@@ -1,11 +1,13 @@
 use std::env;
 use tssh::Args;
 
-/// Extracts username and hostname and passes it to tssh for processing
+/// Extracts username and hostname and passes it to tssh for processing and prints any runtime errors
 fn main() {
     let cmd_line: Vec<String> = env::args().collect();
     if let Some(args) = parse_args(&cmd_line) {
-        tssh::run(args);
+        if let Err(err) = tssh::run(args) {
+            eprintln!("{err}");
+        }
     }
 }
 
