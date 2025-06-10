@@ -36,14 +36,14 @@ pub fn run(args: Args) -> Result<(), Error> {
     // <------------------------------------ Exchage version information ------------------------------------>
     stream.write_all(b"SSH-2.0-TSSH_1.0\r\n")?;
 
-    let mut buf: [u8; 512] = [0; 512];
+    let mut buf: [u8; 255] = [0; 255];
 
     let num_read = stream.read(&mut buf)?;
 
     let host_version = String::from_utf8_lossy(&buf[..num_read]);
 
     // Validate host version format
-    if !host_version.starts_with("SSH") || !host_version.ends_with("\n") {
+    if !host_version.starts_with("SSH") || !host_version.ends_with("\r\n") {
         return Err(Error::Other(
             "Recieved invalid version info: Host did not follow SSH version exchange protocol",
         ));
