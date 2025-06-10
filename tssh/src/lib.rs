@@ -1,5 +1,5 @@
 use std::fmt;
-use std::io::{self, Read, Write};
+use std::io::{self, BufRead, BufReader, Write};
 use std::net::TcpStream;
 
 /// The arguments used
@@ -34,16 +34,29 @@ pub fn run(args: Args) -> Result<(), Error> {
     let mut stream = TcpStream::connect(format!("{}:22", args.hostname))?;
 
     // <------------------------------------ Exchage version information ------------------------------------>
+    // Send version info to host
     stream.write_all(b"SSH-2.0-TSSH_1.0\r\n")?;
 
-    let mut buf: [u8; 255] = [0; 255];
+    // Recieve version info from host
+    let mut reader = BufReader::new(&stream);
 
-    let num_read = stream.read(&mut buf)?;
+    let mut host_version = String::new();
+    let mut num_read = reader.read_line(&mut host_version)?;
 
-    let host_version = String::from_utf8_lossy(&buf[..num_read]);
+    // Ignore header information
+    while !host_version.starts_with("SSH-") {
+        // Check if reached end of data stream
+        if num_read == 0 {
+            return Err(Error::Other("Did not recieve version info from host"));
+        }
+
+        host_version = String::new();
+        num_read = reader.read_line(&mut host_version)?;
+    }
 
     // Validate host version format
-    if !host_version.starts_with("SSH") || !host_version.ends_with("\r\n") {
+    if !host_version.ends_with("\r\n") || num_read > 255 {
+        eprintln!("{host_version}");
         return Err(Error::Other(
             "Recieved invalid version info: Host did not follow SSH version exchange protocol",
         ));
