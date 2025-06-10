@@ -29,16 +29,24 @@ impl fmt::Display for Error {
     }
 }
 
+/// Establishes a connection to a given host and procedes with SSH authentication and connection
 pub fn run(args: Args) -> Result<(), Error> {
     // Establish connection
     let mut stream = TcpStream::connect(format!("{}:22", args.hostname))?;
 
-    // <------------------------------------ Exchage version information ------------------------------------>
+    // Runs the SSH version exchange protocol
+    exchange_versions(&mut stream)?;
+
+    Ok(())
+}
+
+/// Exchanges version information via the SSH-2.0 version exchange protocol over the given TCP stream
+fn exchange_versions(stream: &mut TcpStream) -> Result<(), Error> {
     // Send version info to host
     stream.write_all(b"SSH-2.0-TSSH_1.0\r\n")?;
 
     // Recieve version info from host
-    let mut reader = BufReader::new(&stream);
+    let mut reader = BufReader::new(stream);
 
     let mut host_version = String::new();
     let mut num_read = reader.read_line(&mut host_version)?;
