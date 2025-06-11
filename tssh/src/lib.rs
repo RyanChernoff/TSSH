@@ -149,6 +149,7 @@ fn exchange_keys(stream: &mut TcpStream) -> Result<(), Error> {
         ));
     }
 
+    // Extract packet information
     let cookie = &packet[..16];
 
     let (key_exchange_algs, packet) = extract_name_list(&packet[16..])?;
@@ -170,18 +171,18 @@ fn exchange_keys(stream: &mut TcpStream) -> Result<(), Error> {
     let server_guess: bool = packet[0] != 0;
 
     // Begin negotiating shared algorithm
-    let key_exchange_alg = negotiate_alg(&KEX_ALGS, key_exchange_algs)?;
+    let key_exchange_alg = negotiate_alg(&KEX_ALGS, &key_exchange_algs)?;
 
-    let host_key_alg = negotiate_alg(&HOST_KEY_ALGS, host_key_algs)?;
+    let host_key_alg = negotiate_alg(&HOST_KEY_ALGS, &host_key_algs)?;
 
-    let encrypt_alg_cts = negotiate_alg(&ENCRYPT_ALGS, encrypt_algs_cts)?;
-    let encrypt_alg_stc = negotiate_alg(&ENCRYPT_ALGS, encrypt_algs_stc)?;
+    let encrypt_alg_cts = negotiate_alg(&ENCRYPT_ALGS, &encrypt_algs_cts)?;
+    let encrypt_alg_stc = negotiate_alg(&ENCRYPT_ALGS, &encrypt_algs_stc)?;
 
-    let mac_alg_cts = negotiate_alg(&MAC_ALGS, mac_algs_cts)?;
-    let mac_alg_stc = negotiate_alg(&MAC_ALGS, mac_algs_stc)?;
+    let mac_alg_cts = negotiate_alg(&MAC_ALGS, &mac_algs_cts)?;
+    let mac_alg_stc = negotiate_alg(&MAC_ALGS, &mac_algs_stc)?;
 
-    let compress_alg_cts = negotiate_alg(&COMPRESS_ALGS, compress_algs_cts)?;
-    let compress_alg_stc = negotiate_alg(&COMPRESS_ALGS, compress_algs_stc)?;
+    let compress_alg_cts = negotiate_alg(&COMPRESS_ALGS, &compress_algs_cts)?;
+    let compress_alg_stc = negotiate_alg(&COMPRESS_ALGS, &compress_algs_stc)?;
 
     println!("{key_exchange_alg}");
     println!("{host_key_alg}");
@@ -191,6 +192,8 @@ fn exchange_keys(stream: &mut TcpStream) -> Result<(), Error> {
     println!("{mac_alg_stc}");
     println!("{compress_alg_cts}");
     println!("{compress_alg_stc}");
+
+    // Normally you check for incorrect kex guesses here but the only implemented algorithm requires client to move first
 
     Ok(())
 }
@@ -216,7 +219,7 @@ fn wait_for_packet(stream: &mut TcpStream, wait_type: u8) -> Result<Vec<u8>, Err
 
 /// Runs the ssh negotioation algorithm on a list of client algorithms and a vector of server algorithms
 /// and returns the first client algorithm that appears in the server list or throws an error if is found.
-fn negotiate_alg(client: &[&'static str], server: Vec<String>) -> Result<&'static str, Error> {
+fn negotiate_alg(client: &[&'static str], server: &Vec<String>) -> Result<&'static str, Error> {
     match client.iter().find(
         |alg: &&&str| match server.iter().find(|s: &&String| s == alg) {
             Some(_) => true,
