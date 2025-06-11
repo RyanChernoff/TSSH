@@ -26,9 +26,31 @@ const KEX_PAYLOAD: &[u8; 146] = b"\x140123456789abcdef\
     \x00\
     \x00\x00\x00\x00";
 
-/// The arguments used
+/// List of supported key exchange algorithms
+const KEX_ALGS: [&'static str; 1] = ["ecdh-sha2-nistp256"];
+
+/// List of supported host key varification algorithms
+/// these must be compatible with all kex algorithms for now
+const HOST_KEY_ALGS: [&'static str; 1] = ["rsa-sha2-512"];
+
+/// List of all supported encryption algorithms
+/// (both server to client and client to server)
+const ENCRYPT_ALGS: [&'static str; 1] = ["aes256-ctr"];
+
+/// List of all supported mac algorithms
+/// (both server to client and client to server)
+const MAC_ALGS: [&'static str; 1] = ["hmac-sha2-256"];
+
+/// List of all supported compression algorithms
+/// (both server to client and client to server)
+const COMPRESS_ALGS: [&'static str; 1] = ["none"];
+
+/// The arguments used when first run
 pub struct Args<'a> {
+    /// The username to sign in as via SSH
     pub username: &'a str,
+    /// The name or ip adress of the host server for
+    /// establishing TCP/IP connection
     pub hostname: &'a str,
 }
 
@@ -112,6 +134,7 @@ fn exchange_versions(stream: &mut TcpStream) -> Result<(), Error> {
     Ok(())
 }
 
+/// Runs the secret key exchange portion of the SSH transport layer
 fn exchange_keys(stream: &mut TcpStream) -> Result<(), Error> {
     // Send key negotiation information
     send_packet(stream, KEX_PAYLOAD, 8, &[])?;
@@ -128,74 +151,46 @@ fn exchange_keys(stream: &mut TcpStream) -> Result<(), Error> {
 
     let cookie = &packet[..16];
 
-    let (key_exchang_alg, packet) = extract_name_list(&packet[16..])?;
-    let (host_key_alg, packet) = extract_name_list(packet)?;
+    let (key_exchange_algs, packet) = extract_name_list(&packet[16..])?;
 
-    let (encrpt_alg_cts, packet) = extract_name_list(packet)?;
-    let (encrpt_alg_stc, packet) = extract_name_list(packet)?;
+    let (host_key_algs, packet) = extract_name_list(packet)?;
 
-    let (mac_alg_cts, packet) = extract_name_list(packet)?;
-    let (mac_alg_stc, packet) = extract_name_list(packet)?;
+    let (encrypt_algs_cts, packet) = extract_name_list(packet)?;
+    let (encrypt_algs_stc, packet) = extract_name_list(packet)?;
 
-    let (compression_alg_cts, packet) = extract_name_list(packet)?;
-    let (compression_alg_stc, packet) = extract_name_list(packet)?;
+    let (mac_algs_cts, packet) = extract_name_list(packet)?;
+    let (mac_algs_stc, packet) = extract_name_list(packet)?;
 
-    let (languages_cts, packet) = extract_name_list(packet)?;
-    let (languages_stc, packet) = extract_name_list(packet)?;
+    let (compress_algs_cts, packet) = extract_name_list(packet)?;
+    let (compress_algs_stc, packet) = extract_name_list(packet)?;
+
+    let (_, packet) = extract_name_list(packet)?;
+    let (_, packet) = extract_name_list(packet)?;
 
     let server_guess: bool = packet[0] != 0;
 
-    for i in key_exchang_alg {
-        print!("{} ", i);
-    }
-    println!("\n");
+    // Begin negotiating shared algorithm
+    let key_exchange_alg = negotiate_alg(&KEX_ALGS, key_exchange_algs)?;
 
-    for i in host_key_alg {
-        print!("{} ", i);
-    }
-    println!("\n");
+    let host_key_alg = negotiate_alg(&HOST_KEY_ALGS, host_key_algs)?;
 
-    for i in encrpt_alg_cts {
-        print!("{} ", i);
-    }
-    println!("\n");
+    let encrypt_alg_cts = negotiate_alg(&ENCRYPT_ALGS, encrypt_algs_cts)?;
+    let encrypt_alg_stc = negotiate_alg(&ENCRYPT_ALGS, encrypt_algs_stc)?;
 
-    for i in encrpt_alg_stc {
-        print!("{} ", i);
-    }
-    println!("\n");
+    let mac_alg_cts = negotiate_alg(&MAC_ALGS, mac_algs_cts)?;
+    let mac_alg_stc = negotiate_alg(&MAC_ALGS, mac_algs_stc)?;
 
-    for i in mac_alg_cts {
-        print!("{} ", i);
-    }
-    println!("\n");
+    let compress_alg_cts = negotiate_alg(&COMPRESS_ALGS, compress_algs_cts)?;
+    let compress_alg_stc = negotiate_alg(&COMPRESS_ALGS, compress_algs_stc)?;
 
-    for i in mac_alg_stc {
-        print!("{} ", i);
-    }
-    println!("\n");
-
-    for i in compression_alg_cts {
-        print!("{} ", i);
-    }
-    println!("\n");
-
-    for i in compression_alg_stc {
-        print!("{} ", i);
-    }
-    println!("\n");
-
-    for i in languages_cts {
-        print!("{} ", i);
-    }
-    println!("\n");
-
-    for i in languages_stc {
-        print!("{} ", i);
-    }
-    println!("\n");
-
-    println!("{}", server_guess);
+    println!("{key_exchange_alg}");
+    println!("{host_key_alg}");
+    println!("{encrypt_alg_cts}");
+    println!("{encrypt_alg_stc}");
+    println!("{mac_alg_cts}");
+    println!("{mac_alg_stc}");
+    println!("{compress_alg_cts}");
+    println!("{compress_alg_stc}");
 
     Ok(())
 }
@@ -216,6 +211,20 @@ fn wait_for_packet(stream: &mut TcpStream, wait_type: u8) -> Result<Vec<u8>, Err
         if packet_type == SSH_MSG_DISCONNECT {
             return Err(Error::Other("Host sent ssh disconnect message"));
         }
+    }
+}
+
+/// Runs the ssh negotioation algorithm on a list of client algorithms and a vector of server algorithms
+/// and returns the first client algorithm that appears in the server list or throws an error if is found.
+fn negotiate_alg(client: &[&'static str], server: Vec<String>) -> Result<&'static str, Error> {
+    match client.iter().find(
+        |alg: &&&str| match server.iter().find(|s: &&String| s == alg) {
+            Some(_) => true,
+            None => false,
+        },
+    ) {
+        Some(alg) => Ok(*alg),
+        None => return Err(Error::Other("Could not find compatible algorithms")),
     }
 }
 
