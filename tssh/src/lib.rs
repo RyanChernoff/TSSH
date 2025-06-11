@@ -8,9 +8,9 @@ use std::net::TcpStream;
 const SSH_VERSION: &[u8; 18] = b"SSH-2.0-TSSH_1.0\r\n";
 
 /// The payload containing all key exchange preferences
-const KEX_PAYLOAD: &[u8; 152] = b"\x140123456789abcdef\
-    \x00\x00\x00\x1ddiffie-hellman-group16-sha256\
-    \x00\x00\x00\x07ssh-rsa\
+const KEX_PAYLOAD: &[u8; 146] = b"\x140123456789abcdef\
+    \x00\x00\x00\x12ecdh-sha2-nistp256\
+    \x00\x00\x00\x0crsa-sha2-512\
     \x00\x00\x00\x0aaes256-ctr\
     \x00\x00\x00\x0aaes256-ctr\
     \x00\x00\x00\x0dhmac-sha2-256\
@@ -108,13 +108,11 @@ fn exchange_versions(stream: &mut TcpStream) -> Result<(), Error> {
         ));
     }
 
-    print!("{host_version}");
-
     Ok(())
 }
 
 fn exchange_keys(stream: &mut TcpStream) -> Result<(), Error> {
-    //send_packet(stream, KEX_PAYLOAD, 8, &[])?;
+    send_packet(stream, KEX_PAYLOAD, 8, &[])?;
 
     // Read key exchange info
     let mut buf: [u8; 35000] = [0; 35000];
@@ -126,7 +124,81 @@ fn exchange_keys(stream: &mut TcpStream) -> Result<(), Error> {
 
     let packet = parse_packet(&buf)?;
 
-    println!("{}", buf[5]);
+    if packet.len() < 72 {
+        return Err(Error::Other(
+            "Key exchange packet is not large enough to contain all key exchange info",
+        ));
+    }
+
+    if packet[0] != 20 {
+        return Err(Error::Other("Did not recieve valid key exchange packet"));
+    }
+
+    let cookie = &packet[1..17];
+
+    let (key_exchang_alg, packet) = extract_name_list(&packet[17..])?;
+    let (host_key_alg, packet) = extract_name_list(packet)?;
+    let (encrpt_alg_cts, packet) = extract_name_list(packet)?;
+    let (encrpt_alg_stc, packet) = extract_name_list(packet)?;
+    let (mac_alg_cts, packet) = extract_name_list(packet)?;
+    let (mac_alg_stc, packet) = extract_name_list(packet)?;
+    let (compression_alg_cts, packet) = extract_name_list(packet)?;
+    let (compression_alg_stc, packet) = extract_name_list(packet)?;
+    let (languages_cts, packet) = extract_name_list(packet)?;
+    let (languages_stc, packet) = extract_name_list(packet)?;
+    let server_guess: bool = packet[0] != 0;
+
+    for i in key_exchang_alg {
+        print!("{} ", i);
+    }
+    println!("");
+
+    for i in host_key_alg {
+        print!("{} ", i);
+    }
+    println!("");
+
+    for i in encrpt_alg_cts {
+        print!("{} ", i);
+    }
+    println!("");
+
+    for i in encrpt_alg_stc {
+        print!("{} ", i);
+    }
+    println!("");
+
+    for i in mac_alg_cts {
+        print!("{} ", i);
+    }
+    println!("");
+
+    for i in mac_alg_stc {
+        print!("{} ", i);
+    }
+    println!("");
+
+    for i in compression_alg_cts {
+        print!("{} ", i);
+    }
+    println!("");
+
+    for i in compression_alg_stc {
+        print!("{} ", i);
+    }
+    println!("");
+
+    for i in languages_cts {
+        print!("{} ", i);
+    }
+    println!("");
+
+    for i in languages_stc {
+        print!("{} ", i);
+    }
+    println!("");
+
+    println!("{}", server_guess);
 
     Ok(())
 }
@@ -207,4 +279,18 @@ fn parse_packet(packet: &[u8]) -> Result<&[u8], Error> {
     // Get the slice containing the payload
     let payload_length = (packet_length - padding_length - 1) as usize;
     Ok(&packet[5..(payload_length + 4)])
+}
+
+/// Parses an SSH name-list field into a vector of the string contents in the list.
+/// What is leftover of the packet the contains the list is returned along with the vector list.
+fn extract_name_list(start: &[u8]) -> Result<(Vec<String>, &[u8]), Error> {
+    // extract list length
+    let list_length = u32::from_be_bytes((&start[0..4]).try_into()?) as usize;
+
+    // Get the rest of the list
+    let new_start = &start[(list_length + 4)..];
+    let list_string = String::from_utf8_lossy(&start[4..(list_length + 4)]).to_string();
+    let list: Vec<String> = list_string.split(",").map(|s| s.to_string()).collect();
+
+    Ok((list, new_start))
 }
