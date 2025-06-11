@@ -114,15 +114,8 @@ fn exchange_versions(stream: &mut TcpStream) -> Result<(), Error> {
 fn exchange_keys(stream: &mut TcpStream) -> Result<(), Error> {
     send_packet(stream, KEX_PAYLOAD, 8, &[])?;
 
-    // Read key exchange info
-    let mut buf: [u8; 35000] = [0; 35000];
-    if stream.read(&mut buf)? < 16 {
-        return Err(Error::Other(
-            "Did not recieve key exchange information from host",
-        ));
-    };
-
-    let packet = parse_packet(&buf)?;
+    // Reads next packet which should be a key exchange
+    let packet = read_packet(stream)?;
 
     if packet.len() < 72 {
         return Err(Error::Other(
@@ -249,9 +242,13 @@ fn send_packet(
 /// Requires that the packet (not just the buffer that contains it) meet
 /// the minimum length requirement of 16 bytes and the maximum length requirement
 /// of 35000 bytes.
-fn parse_packet(packet: &[u8]) -> Result<&[u8], Error> {
+fn read_packet(stream: &mut TcpStream) -> Result<Vec<u8>, Error> {
+    // Get padding length
+    let mut len_buf: [u8; 4] = [0; 4];
+    stream.read_exact(&mut len_buf)?;
+
     // Extract the packet length
-    let packet_length: u32 = u32::from_be_bytes((&packet[0..4]).try_into()?);
+    let packet_length: usize = u32::from_be_bytes(len_buf) as usize;
     if packet_length < 12 {
         return Err(Error::Other(
             "Packet length is too small: Expected at least 12 bytes",
@@ -263,8 +260,12 @@ fn parse_packet(packet: &[u8]) -> Result<&[u8], Error> {
         ));
     }
 
+    // Get rest of packet
+    let mut packet = vec![0u8; packet_length];
+    stream.read_exact(&mut packet)?;
+
     // Extract padding length
-    let padding_length: u32 = packet[4] as u32;
+    let padding_length: usize = packet[0] as usize;
     if padding_length < 4 {
         return Err(Error::Other(
             "Packet has too little padding: Expected at least 4",
@@ -277,8 +278,10 @@ fn parse_packet(packet: &[u8]) -> Result<&[u8], Error> {
     }
 
     // Get the slice containing the payload
+    packet.remove(0);
     let payload_length = (packet_length - padding_length - 1) as usize;
-    Ok(&packet[5..(payload_length + 4)])
+    packet.truncate(payload_length);
+    Ok(packet)
 }
 
 /// Parses an SSH name-list field into a vector of the string contents in the list.
