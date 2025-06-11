@@ -5,6 +5,7 @@ use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 
 // Packet Types
+const SSH_MSG_DISCONNECT: u8 = 1;
 const SSH_MSG_KEXINIT: u8 = 20;
 
 /// Version bytes to send to host during version exchange
@@ -68,22 +69,7 @@ pub fn run(args: Args) -> Result<(), Error> {
     // Runs the SSH version exchange protocol
     exchange_versions(&mut stream)?;
 
-    // Send key negotiation information
-    send_packet(&mut stream, KEX_PAYLOAD, 8, &[])?;
-
-    // Process each packet
-    loop {
-        let (packet_type, packet) = read_packet(&mut stream)?;
-        match packet_type {
-            SSH_MSG_KEXINIT => {
-                exchange_keys(packet)?;
-            }
-            _ => {
-                println!("{packet_type}");
-                return Ok(());
-            }
-        }
-    }
+    exchange_keys(&mut stream)
 }
 
 /// Exchanges version information via the SSH-2.0 version exchange protocol over the given TCP stream
@@ -126,7 +112,14 @@ fn exchange_versions(stream: &mut TcpStream) -> Result<(), Error> {
     Ok(())
 }
 
-fn exchange_keys(packet: Vec<u8>) -> Result<(), Error> {
+fn exchange_keys(stream: &mut TcpStream) -> Result<(), Error> {
+    // Send key negotiation information
+    send_packet(stream, KEX_PAYLOAD, 8, &[])?;
+
+    // Wait until recieved key exchange packet each packet
+    let packet = wait_for_packet(stream, SSH_MSG_KEXINIT)?;
+
+    // Ensure packet can be a key exchange packet
     if packet.len() < 61 {
         return Err(Error::Other(
             "Key exchange packet is not large enough to contain all key exchange info",
@@ -137,69 +130,93 @@ fn exchange_keys(packet: Vec<u8>) -> Result<(), Error> {
 
     let (key_exchang_alg, packet) = extract_name_list(&packet[16..])?;
     let (host_key_alg, packet) = extract_name_list(packet)?;
+
     let (encrpt_alg_cts, packet) = extract_name_list(packet)?;
     let (encrpt_alg_stc, packet) = extract_name_list(packet)?;
+
     let (mac_alg_cts, packet) = extract_name_list(packet)?;
     let (mac_alg_stc, packet) = extract_name_list(packet)?;
+
     let (compression_alg_cts, packet) = extract_name_list(packet)?;
     let (compression_alg_stc, packet) = extract_name_list(packet)?;
+
     let (languages_cts, packet) = extract_name_list(packet)?;
     let (languages_stc, packet) = extract_name_list(packet)?;
+
     let server_guess: bool = packet[0] != 0;
 
     for i in key_exchang_alg {
         print!("{} ", i);
     }
-    println!("");
+    println!("\n");
 
     for i in host_key_alg {
         print!("{} ", i);
     }
-    println!("");
+    println!("\n");
 
     for i in encrpt_alg_cts {
         print!("{} ", i);
     }
-    println!("");
+    println!("\n");
 
     for i in encrpt_alg_stc {
         print!("{} ", i);
     }
-    println!("");
+    println!("\n");
 
     for i in mac_alg_cts {
         print!("{} ", i);
     }
-    println!("");
+    println!("\n");
 
     for i in mac_alg_stc {
         print!("{} ", i);
     }
-    println!("");
+    println!("\n");
 
     for i in compression_alg_cts {
         print!("{} ", i);
     }
-    println!("");
+    println!("\n");
 
     for i in compression_alg_stc {
         print!("{} ", i);
     }
-    println!("");
+    println!("\n");
 
     for i in languages_cts {
         print!("{} ", i);
     }
-    println!("");
+    println!("\n");
 
     for i in languages_stc {
         print!("{} ", i);
     }
-    println!("");
+    println!("\n");
 
     println!("{}", server_guess);
 
     Ok(())
+}
+
+/// Continuously reads SSH packets from a TcpStream until it finds one with an ssh code that matches
+/// the wait type. If it runs into an SSH_MSG_DISCONNECT packet it returns with an error.
+fn wait_for_packet(stream: &mut TcpStream, wait_type: u8) -> Result<Vec<u8>, Error> {
+    loop {
+        // Read next packet
+        let (packet_type, packet) = read_packet(stream)?;
+
+        // Check if recieved desired packet
+        if packet_type == wait_type {
+            return Ok(packet);
+        }
+
+        // Check if recieved disconnect
+        if packet_type == SSH_MSG_DISCONNECT {
+            return Err(Error::Other("Host sent ssh disconnect message"));
+        }
+    }
 }
 
 /// Sends an SSH packet (payload must already be encrpted)
@@ -239,7 +256,7 @@ fn send_packet(
     packet.extend(mac);
 
     // Send packet
-    stream.write(&packet)?;
+    stream.write_all(&packet)?;
 
     Ok(())
 }
