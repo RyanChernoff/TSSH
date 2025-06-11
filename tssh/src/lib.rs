@@ -4,6 +4,9 @@ use std::fmt;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 
+// Packet Types
+const SSH_MSG_KEXINIT: u8 = 20;
+
 /// Version bytes to send to host during version exchange
 const SSH_VERSION: &[u8; 18] = b"SSH-2.0-TSSH_1.0\r\n";
 
@@ -65,10 +68,22 @@ pub fn run(args: Args) -> Result<(), Error> {
     // Runs the SSH version exchange protocol
     exchange_versions(&mut stream)?;
 
-    // Runs SSH key exchange protocol
-    exchange_keys(&mut stream)?;
+    // Send key negotiation information
+    send_packet(&mut stream, KEX_PAYLOAD, 8, &[])?;
 
-    Ok(())
+    // Process each packet
+    loop {
+        let (packet_type, packet) = read_packet(&mut stream)?;
+        match packet_type {
+            SSH_MSG_KEXINIT => {
+                exchange_keys(packet)?;
+            }
+            _ => {
+                println!("{packet_type}");
+                return Ok(());
+            }
+        }
+    }
 }
 
 /// Exchanges version information via the SSH-2.0 version exchange protocol over the given TCP stream
@@ -111,25 +126,16 @@ fn exchange_versions(stream: &mut TcpStream) -> Result<(), Error> {
     Ok(())
 }
 
-fn exchange_keys(stream: &mut TcpStream) -> Result<(), Error> {
-    send_packet(stream, KEX_PAYLOAD, 8, &[])?;
-
-    // Reads next packet which should be a key exchange
-    let packet = read_packet(stream)?;
-
-    if packet.len() < 72 {
+fn exchange_keys(packet: Vec<u8>) -> Result<(), Error> {
+    if packet.len() < 61 {
         return Err(Error::Other(
             "Key exchange packet is not large enough to contain all key exchange info",
         ));
     }
 
-    if packet[0] != 20 {
-        return Err(Error::Other("Did not recieve valid key exchange packet"));
-    }
+    let cookie = &packet[..16];
 
-    let cookie = &packet[1..17];
-
-    let (key_exchang_alg, packet) = extract_name_list(&packet[17..])?;
+    let (key_exchang_alg, packet) = extract_name_list(&packet[16..])?;
     let (host_key_alg, packet) = extract_name_list(packet)?;
     let (encrpt_alg_cts, packet) = extract_name_list(packet)?;
     let (encrpt_alg_stc, packet) = extract_name_list(packet)?;
@@ -242,7 +248,7 @@ fn send_packet(
 /// Requires that the packet (not just the buffer that contains it) meet
 /// the minimum length requirement of 16 bytes and the maximum length requirement
 /// of 35000 bytes.
-fn read_packet(stream: &mut TcpStream) -> Result<Vec<u8>, Error> {
+fn read_packet(stream: &mut TcpStream) -> Result<(u8, Vec<u8>), Error> {
     // Get padding length
     let mut len_buf: [u8; 4] = [0; 4];
     stream.read_exact(&mut len_buf)?;
@@ -277,11 +283,12 @@ fn read_packet(stream: &mut TcpStream) -> Result<Vec<u8>, Error> {
         ));
     }
 
-    // Get the slice containing the payload
+    // Get the slice containing the payload and its packet type
     packet.remove(0);
+    let packet_type = packet.remove(0);
     let payload_length = (packet_length - padding_length - 1) as usize;
     packet.truncate(payload_length);
-    Ok(packet)
+    Ok((packet_type, packet))
 }
 
 /// Parses an SSH name-list field into a vector of the string contents in the list.
