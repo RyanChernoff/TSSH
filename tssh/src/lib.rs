@@ -173,14 +173,38 @@ fn send_packet(
     Ok(())
 }
 
-/// Returns the payload of an ssh packet unencrypted and uncompressed.
+/// Returns the payload of an ssh packet.
 /// Requires that the packet (not just the buffer that contains it) meet
 /// the minimum length requirement of 16 bytes and the maximum length requirement
 /// of 35000 bytes.
-///
-/// Throws an error on failiure to verify mac
 fn parse_packet(packet: &[u8]) -> Result<&[u8], Error> {
+    // Extract the packet length
     let packet_length: u32 = u32::from_be_bytes((&packet[0..4]).try_into()?);
+    if packet_length < 12 {
+        return Err(Error::Other(
+            "Packet length is too small: Expected at least 12 bytes",
+        ));
+    }
+    if packet_length + 4 > 35000 {
+        return Err(Error::Other(
+            "Packet length is too largs: Expected at most 35000 bytes",
+        ));
+    }
 
-    Ok(&packet[0..4])
+    // Extract padding length
+    let padding_length: u32 = packet[4] as u32;
+    if padding_length < 4 {
+        return Err(Error::Other(
+            "Packet has too little padding: Expected at least 4",
+        ));
+    }
+    if packet_length - 2 < padding_length {
+        return Err(Error::Other(
+            "Invalid Padding length: Expected payload is less than 1",
+        ));
+    }
+
+    // Get the slice containing the payload
+    let payload_length = (packet_length - padding_length - 1) as usize;
+    Ok(&packet[5..(payload_length + 4)])
 }
