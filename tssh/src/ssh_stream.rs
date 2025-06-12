@@ -12,25 +12,6 @@ impl SshStream {
         SshStream(stream)
     }
 
-    /// Continuously reads SSH packets until it finds one with an ssh code that matches
-    /// the wait type. If it runs into an SSH_MSG_DISCONNECT packet it returns with an error.
-    pub fn read_until(&mut self, wait_type: u8) -> Result<Vec<u8>, Error> {
-        loop {
-            // Read next packet
-            let (packet_type, packet) = self.read()?;
-
-            // Check if recieved desired packet
-            if packet_type == wait_type {
-                return Ok(packet);
-            }
-
-            // Check if recieved disconnect
-            if packet_type == SSH_MSG_DISCONNECT {
-                return Err(Error::Other("Host sent ssh disconnect message"));
-            }
-        }
-    }
-
     /// Returns the payload of the next ssh packet.
     /// Requires that the packet (not just the buffer that contains it) meet
     /// the minimum length requirement of 16 bytes and the maximum length requirement
@@ -114,5 +95,24 @@ impl SshStream {
         stream.write_all(&packet)?;
 
         Ok(())
+    }
+
+    /// Continuously reads SSH packets until it finds one with an ssh code that matches
+    /// the wait type. If it runs into an SSH_MSG_DISCONNECT packet it returns with an error.
+    pub fn read_until(&mut self, wait_type: u8) -> Result<Vec<u8>, Error> {
+        loop {
+            // Read next packet
+            let (packet_type, packet) = self.read()?;
+
+            // Check if recieved desired packet
+            if packet_type == wait_type {
+                return Ok(packet);
+            }
+
+            // Check if recieved disconnect
+            if packet_type == SSH_MSG_DISCONNECT {
+                return Err(Error::Other("Host sent ssh disconnect message"));
+            }
+        }
     }
 }

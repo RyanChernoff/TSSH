@@ -219,6 +219,20 @@ fn gen_kexinit_payload() -> Vec<u8> {
     payload
 }
 
+/// Runs the ssh negotioation algorithm on a list of client algorithms and a vector of server algorithms
+/// and returns the first client algorithm that appears in the server list or throws an error if is found.
+fn negotiate_alg(client: &[&'static str], server: &Vec<String>) -> Result<&'static str, Error> {
+    match client.iter().find(
+        |alg: &&&str| match server.iter().find(|s: &&String| s == alg) {
+            Some(_) => true,
+            None => false,
+        },
+    ) {
+        Some(alg) => Ok(*alg),
+        None => return Err(Error::Other("Could not find compatible algorithms")),
+    }
+}
+
 /// Appends an ssh name_list to a vector from a reference to an array
 fn append_name_list(payload: &mut Vec<u8>, list: &[&'static str]) {
     let mut name_list: Vec<u8> = Vec::new();
@@ -241,20 +255,6 @@ fn append_name_list(payload: &mut Vec<u8>, list: &[&'static str]) {
 
     // Add name list
     payload.append(&mut name_list);
-}
-
-/// Runs the ssh negotioation algorithm on a list of client algorithms and a vector of server algorithms
-/// and returns the first client algorithm that appears in the server list or throws an error if is found.
-fn negotiate_alg(client: &[&'static str], server: &Vec<String>) -> Result<&'static str, Error> {
-    match client.iter().find(
-        |alg: &&&str| match server.iter().find(|s: &&String| s == alg) {
-            Some(_) => true,
-            None => false,
-        },
-    ) {
-        Some(alg) => Ok(*alg),
-        None => return Err(Error::Other("Could not find compatible algorithms")),
-    }
 }
 
 /// Parses an SSH name-list field into a vector of the string contents in the list.
