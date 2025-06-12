@@ -81,7 +81,7 @@ impl SshStream {
     }
 
     /// Sends a single SSH packet with the given payload
-    pub fn send(&mut self, payload: &[u8], block_size: u32) -> Result<(), Error> {
+    pub fn send(&mut self, payload: Vec<u8>, block_size: u32) -> Result<(), Error> {
         let SshStream(stream) = self;
 
         // Min block size must be 8
@@ -106,7 +106,7 @@ impl SshStream {
         // Construct packet
         let mut packet = Vec::with_capacity(packet_length as usize + 4);
         packet.extend(packet_length.to_be_bytes());
-        packet.extend([padding_length]);
+        packet.push(padding_length);
         packet.extend(payload);
         packet.extend(padding);
 

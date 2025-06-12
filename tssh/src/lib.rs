@@ -1,5 +1,6 @@
 mod ssh_stream;
 
+use rand::Rng;
 use ssh_stream::SshStream;
 use std::array::TryFromSliceError;
 use std::fmt;
@@ -11,24 +12,6 @@ use std::net::TcpStream;
 const SSH_MSG_DISCONNECT: u8 = 1;
 /// Indicates that a pecket contains key exchange negotiation info
 const SSH_MSG_KEXINIT: u8 = 20;
-
-/// Version bytes to send to host during version exchange
-const SSH_VERSION: &[u8; 18] = b"SSH-2.0-TSSH_1.0\r\n";
-
-/// The payload containing all key exchange preferences
-const KEX_PAYLOAD: &[u8; 146] = b"\x140123456789abcdef\
-    \x00\x00\x00\x12ecdh-sha2-nistp256\
-    \x00\x00\x00\x0crsa-sha2-512\
-    \x00\x00\x00\x0aaes256-ctr\
-    \x00\x00\x00\x0aaes256-ctr\
-    \x00\x00\x00\x0dhmac-sha2-256\
-    \x00\x00\x00\x0dhmac-sha2-256\
-    \x00\x00\x00\x04none\
-    \x00\x00\x00\x04none\
-    \x00\x00\x00\x00\
-    \x00\x00\x00\x00\
-    \x00\
-    \x00\x00\x00\x00";
 
 /// List of supported key exchange algorithms
 const KEX_ALGS: [&'static str; 1] = ["ecdh-sha2-nistp256"];
@@ -104,7 +87,7 @@ pub fn run(args: Args) -> Result<(), Error> {
 /// Exchanges version information via the SSH-2.0 version exchange protocol over the given TCP stream
 fn exchange_versions(stream: &mut TcpStream) -> Result<(), Error> {
     // Send version info to host
-    stream.write_all(SSH_VERSION)?;
+    stream.write_all(b"SSH-2.0-TSSH_1.0\r\n")?;
 
     // Recieve version info from host
     let mut reader = BufReader::new(stream);
@@ -144,7 +127,7 @@ fn exchange_versions(stream: &mut TcpStream) -> Result<(), Error> {
 /// Runs the secret key exchange portion of the SSH transport layer
 fn exchange_keys(stream: &mut SshStream) -> Result<(), Error> {
     // Send key negotiation information
-    stream.send(KEX_PAYLOAD, 8)?;
+    stream.send(gen_kexinit_payload(), 8)?;
 
     // Wait until recieved key exchange packet each packet
     let packet = stream.read_until(SSH_MSG_KEXINIT)?;
@@ -207,6 +190,57 @@ fn exchange_keys(stream: &mut SshStream) -> Result<(), Error> {
     // Normally you check for incorrect kex guesses here but the only implemented algorithm requires client to move first
 
     Ok(())
+}
+
+/// Generates the payload for the ssh key exchange init packet
+fn gen_kexinit_payload() -> Vec<u8> {
+    // Create initial payload
+    let mut payload = vec![SSH_MSG_KEXINIT];
+
+    // Create and add cookie
+    let mut rng = rand::thread_rng();
+    let mut cookie = [0u8; 16];
+    rng.fill(&mut cookie);
+    payload.extend(cookie);
+
+    // Add algorithm name lists
+    append_name_list(&mut payload, &KEX_ALGS);
+    append_name_list(&mut payload, &HOST_KEY_ALGS);
+    append_name_list(&mut payload, &ENCRYPT_ALGS);
+    append_name_list(&mut payload, &ENCRYPT_ALGS);
+    append_name_list(&mut payload, &MAC_ALGS);
+    append_name_list(&mut payload, &MAC_ALGS);
+    append_name_list(&mut payload, &COMPRESS_ALGS);
+    append_name_list(&mut payload, &COMPRESS_ALGS);
+
+    // Add empty language fields, a false guess byte, and a 0 extention
+    payload.extend([0u8; 13]);
+
+    payload
+}
+
+/// Appends an ssh name_list to a vector from a reference to an array
+fn append_name_list(payload: &mut Vec<u8>, list: &[&'static str]) {
+    let mut name_list: Vec<u8> = Vec::new();
+    let mut length: usize = 0;
+
+    for (i, name) in list.iter().enumerate() {
+        let bytes = name.as_bytes();
+        length += bytes.len();
+        name_list.extend(bytes);
+
+        // Add a , seperator if not last item in list
+        if i + 1 < list.len() {
+            name_list.push(44);
+            length += 1;
+        }
+    }
+
+    // Add length
+    payload.extend((length as u32).to_be_bytes());
+
+    // Add name list
+    payload.append(&mut name_list);
 }
 
 /// Runs the ssh negotioation algorithm on a list of client algorithms and a vector of server algorithms
