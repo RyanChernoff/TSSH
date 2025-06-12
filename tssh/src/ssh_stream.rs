@@ -1,5 +1,6 @@
 use crate::{Error, SSH_MSG_DISCONNECT};
 use rand::Rng;
+use rand_core::OsRng;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 
@@ -56,17 +57,17 @@ impl SshStream {
         // Get the slice containing the payload and its packet type
         packet.remove(0);
         let packet_type = packet.remove(0);
-        let payload_length = (packet_length - padding_length - 1) as usize;
+        let payload_length = (packet_length - padding_length - 2) as usize;
         packet.truncate(payload_length);
         Ok((packet_type, packet))
     }
 
     /// Sends a single SSH packet with the given payload
-    pub fn send(&mut self, payload: Vec<u8>, block_size: u32) -> Result<(), Error> {
+    pub fn send(&mut self, payload: &Vec<u8>) -> Result<(), Error> {
         let SshStream(stream) = self;
 
         // Min block size must be 8
-        let block_size = block_size.max(8);
+        let block_size = 8;
 
         // Get payload length
         let payload_length = payload.len() as u32;
@@ -78,8 +79,7 @@ impl SshStream {
         }
 
         // Fill padding with random bytes
-        let mut rng = rand::thread_rng();
-        let padding: Vec<u8> = (0..padding_length).map(|_| rng.r#gen()).collect();
+        let padding: Vec<u8> = (0..padding_length).map(|_| OsRng.r#gen()).collect();
 
         // Calculate the total packet length (excluding this field and the mac field)
         let packet_length = payload_length + (padding_length as u32) + 1;

@@ -5,3 +5,5 @@ edition = "2024"
 
 [dependencies]
 rand = "0.8.5"
+p256 = { version = "0.13", features = ["ecdh"] }
+rand_core = "0.6"

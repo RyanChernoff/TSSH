@@ -1,6 +1,9 @@
+mod encrypter;
 mod ssh_stream;
 
+use encrypter::Encrypter;
 use rand::Rng;
+use rand_core::OsRng;
 use ssh_stream::SshStream;
 use std::array::TryFromSliceError;
 use std::fmt;
@@ -75,19 +78,22 @@ pub fn run(args: Args) -> Result<(), Error> {
     // Establish connection
     let mut stream = TcpStream::connect(format!("{}:22", args.hostname))?;
 
-    // Runs the SSH version exchange protocol
-    exchange_versions(&mut stream)?;
+    // Runs the SSH version exchange protocol and saves version info for exchange hash
+    let hash_prefix = exchange_versions(&mut stream)?;
 
     // Set up SSH stream
     let mut stream = SshStream::new(stream);
 
-    exchange_keys(&mut stream)
+    exchange_keys(&mut stream, hash_prefix.clone())
 }
 
 /// Exchanges version information via the SSH-2.0 version exchange protocol over the given TCP stream
-fn exchange_versions(stream: &mut TcpStream) -> Result<(), Error> {
+fn exchange_versions(stream: &mut TcpStream) -> Result<Vec<u8>, Error> {
+    const CLIENT_VERSION: &[u8; 16] = b"SSH-2.0-TSSH_1.0";
+
     // Send version info to host
-    stream.write_all(b"SSH-2.0-TSSH_1.0\r\n")?;
+    stream.write_all(CLIENT_VERSION)?;
+    stream.write(b"\r\n")?;
 
     // Recieve version info from host
     let mut reader = BufReader::new(stream);
@@ -121,13 +127,24 @@ fn exchange_versions(stream: &mut TcpStream) -> Result<(), Error> {
         ));
     }
 
-    Ok(())
+    // Remove return characters from host_version string
+    host_version.truncate(host_version.len() - 2);
+
+    // Save version info for exchange hash
+    let mut hash_prefix = Vec::from(CLIENT_VERSION);
+    hash_prefix.extend(host_version.as_bytes());
+
+    Ok(hash_prefix)
 }
 
 /// Runs the secret key exchange portion of the SSH transport layer
-fn exchange_keys(stream: &mut SshStream) -> Result<(), Error> {
+fn exchange_keys(stream: &mut SshStream, mut hash_prefix: Vec<u8>) -> Result<(), Error> {
+    // Generate kexinit payload and add it to exchange hash prefix
+    let payload = gen_kexinit_payload();
+    hash_prefix.extend(&payload);
+
     // Send key negotiation information
-    stream.send(gen_kexinit_payload(), 8)?;
+    stream.send(&payload)?;
 
     // Wait until recieved key exchange packet each packet
     let packet = stream.read_until(SSH_MSG_KEXINIT)?;
@@ -138,6 +155,10 @@ fn exchange_keys(stream: &mut SshStream) -> Result<(), Error> {
             "Key exchange packet is not large enough to contain all key exchange info",
         ));
     }
+
+    // Add packet to exchange hash prefix
+    hash_prefix.push(SSH_MSG_KEXINIT);
+    hash_prefix.extend(&packet);
 
     // Extract packet information
 
@@ -189,6 +210,19 @@ fn exchange_keys(stream: &mut SshStream) -> Result<(), Error> {
 
     // Normally you check for incorrect kex guesses here but the only implemented algorithm requires client to move first
 
+    Encrypter::new(
+        stream,
+        key_exchange_alg,
+        host_key_alg,
+        encrypt_alg_cts,
+        encrypt_alg_stc,
+        mac_alg_cts,
+        mac_alg_stc,
+        compress_alg_cts,
+        compress_alg_stc,
+        hash_prefix,
+    );
+
     Ok(())
 }
 
@@ -198,9 +232,8 @@ fn gen_kexinit_payload() -> Vec<u8> {
     let mut payload = vec![SSH_MSG_KEXINIT];
 
     // Create and add cookie
-    let mut rng = rand::thread_rng();
     let mut cookie = [0u8; 16];
-    rng.fill(&mut cookie);
+    OsRng.fill(&mut cookie);
     payload.extend(cookie);
 
     // Add algorithm name lists
