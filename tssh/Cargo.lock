@@ -367,6 +367,7 @@ dependencies = [
  "p256",
  "rand",
  "rand_core",
+ "sha2",
 ]
 
 [[package]]

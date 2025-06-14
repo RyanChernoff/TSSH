@@ -131,8 +131,9 @@ fn exchange_versions(stream: &mut TcpStream) -> Result<Vec<u8>, Error> {
     host_version.truncate(host_version.len() - 2);
 
     // Save version info for exchange hash
-    let mut hash_prefix = Vec::from(CLIENT_VERSION);
-    hash_prefix.extend(host_version.as_bytes());
+    let mut hash_prefix = Vec::new();
+    SshStream::append_string(&mut hash_prefix, CLIENT_VERSION);
+    SshStream::append_string(&mut hash_prefix, host_version.as_bytes());
 
     Ok(hash_prefix)
 }
@@ -141,13 +142,13 @@ fn exchange_versions(stream: &mut TcpStream) -> Result<Vec<u8>, Error> {
 fn exchange_keys(stream: &mut SshStream, mut hash_prefix: Vec<u8>) -> Result<(), Error> {
     // Generate kexinit payload and add it to exchange hash prefix
     let payload = gen_kexinit_payload();
-    hash_prefix.extend(&payload);
+    SshStream::append_string(&mut hash_prefix, &payload);
 
     // Send key negotiation information
     stream.send(&payload)?;
 
     // Wait until recieved key exchange packet each packet
-    let packet = stream.read_until(SSH_MSG_KEXINIT)?;
+    let mut packet = stream.read_until(SSH_MSG_KEXINIT)?;
 
     // Ensure packet can be a key exchange packet
     if packet.len() < 61 {
@@ -157,8 +158,9 @@ fn exchange_keys(stream: &mut SshStream, mut hash_prefix: Vec<u8>) -> Result<(),
     }
 
     // Add packet to exchange hash prefix
-    hash_prefix.push(SSH_MSG_KEXINIT);
-    hash_prefix.extend(&packet);
+    packet.insert(0, SSH_MSG_KEXINIT);
+    SshStream::append_string(&mut hash_prefix, &packet);
+    packet.remove(0);
 
     // Extract packet information
 

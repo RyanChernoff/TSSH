@@ -114,6 +114,8 @@ impl SshStream {
         }
     }
 
+    // Begin type parsing algorithms
+
     /// Appends an ssh name_list to a vector from a reference to an array
     pub fn append_name_list(payload: &mut Vec<u8>, list: &[&'static str]) {
         let mut name_list: Vec<u8> = Vec::new();
@@ -154,15 +156,100 @@ impl SshStream {
 
     /// Parses an SSH string field into a string.
     /// What is leftover of the packet the contains the string is returned along with the string.
-    pub fn extract_string(start: &[u8]) -> Result<(String, &[u8]), Error> {
+    pub fn extract_string(start: &[u8]) -> Result<(Vec<u8>, &[u8]), Error> {
         // extract list length
         let string_length = u32::from_be_bytes((&start[0..4]).try_into()?) as usize;
 
         // Get the rest of the string
         let new_start = &start[(string_length + 4)..];
-        let string = String::from_utf8_lossy(&start[4..(string_length + 4)]).to_string();
-        
+        let string = start[4..(string_length + 4)].to_vec();
+
         Ok((string, new_start))
     }
 
+    /// Appends an ssh name_list to a vector from a reference to an array
+    pub fn append_string(payload: &mut Vec<u8>, string: &[u8]) {
+        let mut length: usize = string.len();
+
+        // Add length
+        payload.extend((length as u32).to_be_bytes());
+
+        // Add string
+        payload.extend(string);
+    }
+
+    /// Converts an integer in the form of an array of bytes into an ssh specified mpint
+    /// and appends it to the vector referenced by payload
+    pub fn append_mpint(payload: &mut Vec<u8>, num: &[u8], is_pos: bool) {
+        // Return 0 in mprint if num is empty
+        if num.len() == 0 {
+            payload.extend([0u8; 4]);
+            return;
+        }
+
+        let mut mpint = Vec::new();
+
+        let mut start: Option<usize> = None;
+
+        if is_pos {
+            // find where the number starts
+            for (i, n) in num.iter().enumerate() {
+                if *n != 0 {
+                    start = Some(i);
+                    break;
+                }
+            }
+
+            // get the starting index or return the mpint 0 if num was all 0s
+            let i = match start {
+                Some(index) => index,
+                None => {
+                    payload.extend([0u8; 4]);
+                    return;
+                }
+            };
+
+            // Check if an additional 0 byte needs to be added
+            if num[i] >= 0x80u8 {
+                mpint.push(0);
+            }
+
+            // Add remaining bytes to mprint
+            for n in &num[i..] {
+                mpint.push(*n);
+            }
+        } else {
+            // find where the number starts
+            for (i, n) in num.iter().enumerate() {
+                if *n != 0xFFu8 {
+                    start = Some(i);
+                }
+            }
+
+            // get the starting index or return the mpint -1 if num was -1
+            let i = match start {
+                Some(index) => index,
+                None => {
+                    payload.extend([0u8, 0u8, 0u8, 1u8, 0xFFu8]);
+                    return;
+                }
+            };
+
+            // Check if an additional 0 byte needs to be added
+            if num[i] < 0x80u8 {
+                mpint.push(0xFFu8);
+            }
+
+            // Add remaining bytes to mprint
+            for n in &num[i..] {
+                mpint.push(*n);
+            }
+        }
+
+        // Add length to payload
+        payload.extend((mpint.len() as u32).to_be_bytes());
+
+        // Add int to payload
+        payload.extend(mpint);
+    }
 }
