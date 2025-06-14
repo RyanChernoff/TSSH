@@ -1,6 +1,4 @@
 use crate::{Error, SSH_MSG_DISCONNECT};
-use rand::Rng;
-use rand_core::OsRng;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 
@@ -78,8 +76,8 @@ impl SshStream {
             padding_length += block_size as u8;
         }
 
-        // Fill padding with random bytes
-        let padding: Vec<u8> = (0..padding_length).map(|_| OsRng.r#gen()).collect();
+        // Fill padding with 0's
+        let padding: Vec<u8> = (0..padding_length).collect();
 
         // Calculate the total packet length (excluding this field and the mac field)
         let packet_length = payload_length + (padding_length as u32) + 1;
@@ -153,4 +151,18 @@ impl SshStream {
 
         Ok((list, new_start))
     }
+
+    /// Parses an SSH string field into a string.
+    /// What is leftover of the packet the contains the string is returned along with the string.
+    pub fn extract_string(start: &[u8]) -> Result<(String, &[u8]), Error> {
+        // extract list length
+        let string_length = u32::from_be_bytes((&start[0..4]).try_into()?) as usize;
+
+        // Get the rest of the string
+        let new_start = &start[(string_length + 4)..];
+        let string = String::from_utf8_lossy(&start[4..(string_length + 4)]).to_string();
+        
+        Ok((string, new_start))
+    }
+
 }
