@@ -165,22 +165,22 @@ fn exchange_keys(stream: &mut SshStream, mut hash_prefix: Vec<u8>) -> Result<(),
     // Don't need cookie but here incase needed later
     // let cookie = &packet[..16];
 
-    let (key_exchange_algs, packet) = extract_name_list(&packet[16..])?;
+    let (key_exchange_algs, packet) = SshStream::extract_name_list(&packet[16..])?;
 
-    let (host_key_algs, packet) = extract_name_list(packet)?;
+    let (host_key_algs, packet) = SshStream::extract_name_list(packet)?;
 
-    let (encrypt_algs_cts, packet) = extract_name_list(packet)?;
-    let (encrypt_algs_stc, packet) = extract_name_list(packet)?;
+    let (encrypt_algs_cts, packet) = SshStream::extract_name_list(packet)?;
+    let (encrypt_algs_stc, packet) = SshStream::extract_name_list(packet)?;
 
-    let (mac_algs_cts, packet) = extract_name_list(packet)?;
-    let (mac_algs_stc, packet) = extract_name_list(packet)?;
+    let (mac_algs_cts, packet) = SshStream::extract_name_list(packet)?;
+    let (mac_algs_stc, packet) = SshStream::extract_name_list(packet)?;
 
-    let (compress_algs_cts, packet) = extract_name_list(packet)?;
-    let (compress_algs_stc, packet) = extract_name_list(packet)?;
+    let (compress_algs_cts, packet) = SshStream::extract_name_list(packet)?;
+    let (compress_algs_stc, packet) = SshStream::extract_name_list(packet)?;
 
     // Disregard language information
-    let (_, packet) = extract_name_list(packet)?;
-    let (_, _) = extract_name_list(packet)?;
+    let (_, packet) = SshStream::extract_name_list(packet)?;
+    let (_, _) = SshStream::extract_name_list(packet)?;
 
     // Only valid guess requires client send first so for now this is irrelevant
     // let server_guess: bool = packet[0] != 0;
@@ -237,14 +237,14 @@ fn gen_kexinit_payload() -> Vec<u8> {
     payload.extend(cookie);
 
     // Add algorithm name lists
-    append_name_list(&mut payload, &KEX_ALGS);
-    append_name_list(&mut payload, &HOST_KEY_ALGS);
-    append_name_list(&mut payload, &ENCRYPT_ALGS);
-    append_name_list(&mut payload, &ENCRYPT_ALGS);
-    append_name_list(&mut payload, &MAC_ALGS);
-    append_name_list(&mut payload, &MAC_ALGS);
-    append_name_list(&mut payload, &COMPRESS_ALGS);
-    append_name_list(&mut payload, &COMPRESS_ALGS);
+    SshStream::append_name_list(&mut payload, &KEX_ALGS);
+    SshStream::append_name_list(&mut payload, &HOST_KEY_ALGS);
+    SshStream::append_name_list(&mut payload, &ENCRYPT_ALGS);
+    SshStream::append_name_list(&mut payload, &ENCRYPT_ALGS);
+    SshStream::append_name_list(&mut payload, &MAC_ALGS);
+    SshStream::append_name_list(&mut payload, &MAC_ALGS);
+    SshStream::append_name_list(&mut payload, &COMPRESS_ALGS);
+    SshStream::append_name_list(&mut payload, &COMPRESS_ALGS);
 
     // Add empty language fields, a false guess byte, and a 0 extention
     payload.extend([0u8; 13]);
@@ -264,42 +264,4 @@ fn negotiate_alg(client: &[&'static str], server: &Vec<String>) -> Result<&'stat
         Some(alg) => Ok(*alg),
         None => return Err(Error::Other("Could not find compatible algorithms")),
     }
-}
-
-/// Appends an ssh name_list to a vector from a reference to an array
-fn append_name_list(payload: &mut Vec<u8>, list: &[&'static str]) {
-    let mut name_list: Vec<u8> = Vec::new();
-    let mut length: usize = 0;
-
-    for (i, name) in list.iter().enumerate() {
-        let bytes = name.as_bytes();
-        length += bytes.len();
-        name_list.extend(bytes);
-
-        // Add a , seperator if not last item in list
-        if i + 1 < list.len() {
-            name_list.push(44);
-            length += 1;
-        }
-    }
-
-    // Add length
-    payload.extend((length as u32).to_be_bytes());
-
-    // Add name list
-    payload.append(&mut name_list);
-}
-
-/// Parses an SSH name-list field into a vector of the string contents in the list.
-/// What is leftover of the packet the contains the list is returned along with the vector list.
-fn extract_name_list(start: &[u8]) -> Result<(Vec<String>, &[u8]), Error> {
-    // extract list length
-    let list_length = u32::from_be_bytes((&start[0..4]).try_into()?) as usize;
-
-    // Get the rest of the list
-    let new_start = &start[(list_length + 4)..];
-    let list_string = String::from_utf8_lossy(&start[4..(list_length + 4)]).to_string();
-    let list: Vec<String> = list_string.split(",").map(|s| s.to_string()).collect();
-
-    Ok((list, new_start))
 }

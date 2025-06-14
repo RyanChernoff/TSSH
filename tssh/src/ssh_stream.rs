@@ -115,4 +115,42 @@ impl SshStream {
             }
         }
     }
+
+    /// Appends an ssh name_list to a vector from a reference to an array
+    pub fn append_name_list(payload: &mut Vec<u8>, list: &[&'static str]) {
+        let mut name_list: Vec<u8> = Vec::new();
+        let mut length: usize = 0;
+
+        for (i, name) in list.iter().enumerate() {
+            let bytes = name.as_bytes();
+            length += bytes.len();
+            name_list.extend(bytes);
+
+            // Add a , seperator if not last item in list
+            if i + 1 < list.len() {
+                name_list.push(44);
+                length += 1;
+            }
+        }
+
+        // Add length
+        payload.extend((length as u32).to_be_bytes());
+
+        // Add name list
+        payload.append(&mut name_list);
+    }
+
+    /// Parses an SSH name-list field into a vector of the string contents in the list.
+    /// What is leftover of the packet the contains the list is returned along with the vector list.
+    pub fn extract_name_list(start: &[u8]) -> Result<(Vec<String>, &[u8]), Error> {
+        // extract list length
+        let list_length = u32::from_be_bytes((&start[0..4]).try_into()?) as usize;
+
+        // Get the rest of the list
+        let new_start = &start[(list_length + 4)..];
+        let list_string = String::from_utf8_lossy(&start[4..(list_length + 4)]).to_string();
+        let list: Vec<String> = list_string.split(",").map(|s| s.to_string()).collect();
+
+        Ok((list, new_start))
+    }
 }
