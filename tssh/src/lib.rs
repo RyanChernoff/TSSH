@@ -201,8 +201,6 @@ fn exchange_keys(stream: &mut SshStream, mut hash_prefix: Vec<u8>) -> Result<(),
     let compress_alg_cts = negotiate_alg(&COMPRESS_ALGS, &compress_algs_cts)?;
     let compress_alg_stc = negotiate_alg(&COMPRESS_ALGS, &compress_algs_stc)?;
 
-    println!("{key_exchange_alg}");
-    println!("{host_key_alg}");
     println!("{encrypt_alg_cts}");
     println!("{encrypt_alg_stc}");
     println!("{mac_alg_cts}");
@@ -223,7 +221,7 @@ fn exchange_keys(stream: &mut SshStream, mut hash_prefix: Vec<u8>) -> Result<(),
         compress_alg_cts,
         compress_alg_stc,
         hash_prefix,
-    );
+    )?;
 
     Ok(())
 }

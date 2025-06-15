@@ -2,7 +2,12 @@ use crate::Error;
 use crate::ssh_stream::SshStream;
 use p256::{NistP256, ecdh::EphemeralSecret, elliptic_curve::PublicKey};
 use rand_core::OsRng;
-use sha2::{Digest, Sha256};
+use rsa::{
+    RsaPublicKey,
+    pkcs1v15::{Pkcs1v15Sign, Signature, VerifyingKey},
+    signature::{self, Verifier},
+};
+use sha2::{Digest, Sha256, Sha512};
 
 const SSH_MSG_KEX_ECDH_INIT: u8 = 30;
 const SSH_MSG_KEX_ECDH_REPLY: u8 = 31;
@@ -30,15 +35,32 @@ impl Encrypter {
         compress_alg_cts: &'static str,
         compress_alg_stc: &'static str,
         hash_prefix: Vec<u8>,
-    ) {
-        let _ = match key_exchange_alg {
-            "ecdh-sha2-nistp256" => Encrypter::ecdh_sha2_nistp256_exchange(stream, hash_prefix),
+    ) -> Result<(), Error> {
+        match key_exchange_alg {
+            "ecdh-sha2-nistp256" => {
+                Encrypter::ecdh_sha2_nistp256_exchange(stream, host_key_alg, hash_prefix)
+            }
             _ => panic!("Made new encrypter for incompattible encryption algorithm"),
-        };
+        }
+    }
+
+    fn verify_hash(
+        host_key_alg: &'static str,
+        host_key: Vec<u8>,
+        hash: &[u8],
+        signature: Vec<u8>,
+    ) -> Result<(), Error> {
+        match host_key_alg {
+            "rsa-sha2-512" => Encrypter::rsa_sha2_512_verify(host_key, hash, signature),
+            _ => Err(Error::Other(
+                "Made new encrypter with invalid host key algorithm",
+            )),
+        }
     }
 
     fn ecdh_sha2_nistp256_exchange(
         stream: &mut SshStream,
+        host_key_alg: &'static str,
         mut hash_prefix: Vec<u8>,
     ) -> Result<(), Error> {
         let secret = EphemeralSecret::random(&mut OsRng);
@@ -69,11 +91,50 @@ impl Encrypter {
         SshStream::append_mpint(&mut hash_prefix, &K, true);
 
         // Compute exchange hash
-        let H = Sha256::digest(hash_prefix);
+        let H = Sha256::digest(hash_prefix).to_vec();
 
         // Verify exchange hash
-        println!("{host_key:?}");
+        Encrypter::verify_hash(host_key_alg, host_key, &H, signature)?;
 
         Ok(())
+    }
+
+    fn rsa_sha2_512_verify(
+        host_key: Vec<u8>,
+        hash: &[u8],
+        signature: Vec<u8>,
+    ) -> Result<(), Error> {
+        // Check for valid key type
+        let (key_type, host_key) = SshStream::extract_string(&host_key)?;
+        if key_type != b"ssh-rsa" {
+            return Err(Error::Other("Invalid host key type: Expected ssh-rsa"));
+        }
+
+        // Create rsa verifying key
+        let (e, host_key) = SshStream::extract_mpint_unsigned(host_key)?;
+        let (n, host_key) = SshStream::extract_mpint_unsigned(host_key)?;
+        let pub_key = match RsaPublicKey::new(n, e) {
+            Ok(key) => key,
+            Err(_) => return Err(Error::Other("Invalid RSA host key")),
+        };
+        let verifying_key = VerifyingKey::<Sha512>::new(pub_key);
+
+        // Extract signature
+        let (sig_type, signature) = SshStream::extract_string(&signature)?;
+        if sig_type != b"rsa-sha2-512" {
+            return Err(Error::Other(
+                "Invalid signature type: Expected rsa-sha2-512",
+            ));
+        }
+        let (signature, _) = SshStream::extract_string(signature)?;
+        let signature = Signature::try_from(signature.as_slice()).unwrap();
+
+        // Verify signature
+        match verifying_key.verify(hash, &signature) {
+            Ok(()) => Ok(()),
+            Err(_) => Err(Error::Other(
+                "Failed to validate signature of exchange hash",
+            )),
+        }
     }
 }

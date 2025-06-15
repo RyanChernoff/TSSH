@@ -1,4 +1,5 @@
 use crate::{Error, SSH_MSG_DISCONNECT};
+use rsa::BigUint;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 
@@ -176,6 +177,18 @@ impl SshStream {
 
         // Add string
         payload.extend(string);
+    }
+
+    pub fn extract_mpint_unsigned(start: &[u8]) -> Result<(BigUint, &[u8]), Error> {
+        // extract list length
+        let num_length = u32::from_be_bytes((&start[0..4]).try_into()?) as usize;
+
+        // Get the rest of the num
+        let new_start = &start[(num_length + 4)..];
+        let num_string = start[4..(num_length + 4)].to_vec();
+        let num = BigUint::from_bytes_be(&num_string);
+
+        Ok((num, new_start))
     }
 
     /// Converts an integer in the form of an array of bytes into an ssh specified mpint
