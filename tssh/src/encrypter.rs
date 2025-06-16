@@ -21,20 +21,35 @@ const SSH_MSG_KEX_ECDH_REPLY: u8 = 31;
 /// A struct containing all information neccessary to encrypt, mac, and compress
 /// messages sent and recieved over an SSHStream.
 pub struct Encrypter {
+    /// Algorithm used for encrypting messages
     encrypt_alg: EncryptAlg,
+    /// Algorithm used for decrypting messages
     decrypt_alg: EncryptAlg,
+    /// Algorithm used for macing sent messages
     mac_alg_send: MacAlg,
+    /// Algorithm used for varifying macs on recieved messages
     mac_alg_recieve: MacAlg,
-    compress_alg_send: CompressAlg,
-    compress_alg_recieve: CompressAlg,
+    /// Algorithm used for compressing messages
+    compress_alg: CompressAlg,
+    /// Algorithm used for decompressing messages
+    decompress_alg: CompressAlg,
+    /// Initial vector for encrypting messages
     iv_encrypt: Vec<u8>,
+    /// Initial vector for decrypting messages
     iv_decrypt: Vec<u8>,
+    /// Key for encrypting messages
     encrypt_key: Vec<u8>,
+    /// Key for decrypting messages
     decrypt_key: Vec<u8>,
+    /// Key for macing messages
     mac_key_send: Vec<u8>,
+    /// Key for verifying messages
     mac_key_recieve: Vec<u8>,
+    /// Number of packets sent (after initial key exchange)
     packet_num_send: u32,
+    /// Number of packets recieved (after initial key exchange)
     packet_num_recieve: u32,
+    /// Unique identifier for the ssh session
     session_id: Vec<u8>,
 }
 
@@ -67,8 +82,8 @@ impl Encrypter {
         decrypt_alg: &'static str,
         mac_alg_send: &'static str,
         mac_alg_recieve: &'static str,
-        compress_alg_send: &'static str,
-        compress_alg_recieve: &'static str,
+        compress_alg: &'static str,
+        decompress_alg: &'static str,
         hash_prefix: Vec<u8>,
         old: Option<Encrypter>,
     ) -> Result<Self, Error> {
@@ -113,7 +128,7 @@ impl Encrypter {
         };
 
         // Determine compression sending information
-        let compress_alg_send = match compress_alg_send {
+        let compress_alg = match compress_alg {
             "none" => CompressAlg::None,
             _ => {
                 return Err(Error::Other(
@@ -123,7 +138,7 @@ impl Encrypter {
         };
 
         // Determine compression sending information
-        let compress_alg_recieve = match compress_alg_recieve {
+        let decompress_alg = match decompress_alg {
             "none" => CompressAlg::None,
             _ => {
                 return Err(Error::Other(
@@ -226,8 +241,8 @@ impl Encrypter {
             decrypt_alg,
             mac_alg_send,
             mac_alg_recieve,
-            compress_alg_send,
-            compress_alg_recieve,
+            compress_alg,
+            decompress_alg,
             iv_encrypt,
             iv_decrypt,
             encrypt_key,

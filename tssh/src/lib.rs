@@ -203,15 +203,15 @@ fn exchange_keys(stream: &mut SshStream, mut hash_prefix: Vec<u8>) -> Result<Enc
     let mac_alg_send = negotiate_alg(&MAC_ALGS, &mac_algs_cts)?;
     let mac_alg_recieve = negotiate_alg(&MAC_ALGS, &mac_algs_stc)?;
 
-    let compress_alg_send = negotiate_alg(&COMPRESS_ALGS, &compress_algs_cts)?;
-    let compress_alg_recieve = negotiate_alg(&COMPRESS_ALGS, &compress_algs_stc)?;
+    let compress_alg = negotiate_alg(&COMPRESS_ALGS, &compress_algs_cts)?;
+    let decompress_alg = negotiate_alg(&COMPRESS_ALGS, &compress_algs_stc)?;
 
     println!("{encrypt_alg}");
     println!("{decrypt_alg}");
     println!("{mac_alg_send}");
     println!("{mac_alg_recieve}");
-    println!("{compress_alg_send}");
-    println!("{compress_alg_recieve}");
+    println!("{compress_alg}");
+    println!("{decompress_alg}");
 
     // Normally you check for incorrect kex guesses here but the only implemented algorithm requires client to move first
 
@@ -223,8 +223,8 @@ fn exchange_keys(stream: &mut SshStream, mut hash_prefix: Vec<u8>) -> Result<Enc
         decrypt_alg,
         mac_alg_send,
         mac_alg_recieve,
-        compress_alg_send,
-        compress_alg_recieve,
+        compress_alg,
+        decompress_alg,
         hash_prefix,
         None,
     )
