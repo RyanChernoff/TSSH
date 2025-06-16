@@ -9,6 +9,7 @@ use rsa::{
 };
 use sha2::{Digest, Sha256, Sha512};
 
+const SSH_MSG_NEWKEYS: u8 = 21;
 const SSH_MSG_KEX_ECDH_INIT: u8 = 30;
 const SSH_MSG_KEX_ECDH_REPLY: u8 = 31;
 
@@ -57,7 +58,7 @@ impl Encrypter {
         compress_alg_recieve: &'static str,
         hash_prefix: Vec<u8>,
         old: Option<Encrypter>,
-    ) -> Result<(), Error> {
+    ) -> Result<Self, Error> {
         // Determine encryption information
         let (iv_encrypt_len, encrypt_key_len, encrypt_alg) = match encrypt_alg {
             "aes256-ctr" => (16usize, 32usize, EncryptAlg::Aes256Ctr),
@@ -130,7 +131,14 @@ impl Encrypter {
             }
         };
 
-        // Extract info for key re-exchange
+        // Send and recieve the SSH_MSG_NEWKEYS message to validate successfule key exchange
+        stream.send(&[SSH_MSG_NEWKEYS])?;
+        let recieved = stream.read_until(SSH_MSG_NEWKEYS)?;
+        if recieved.len() > 0 {
+            return Err(Error::Other("Recieved invalid SSH_MSG_NEWKEYS message"));
+        }
+
+        // Extract info if key re-exchange
         let (packet_num_send, packet_num_recieve, session_id) = match old {
             Some(encrypter) => (
                 encrypter.packet_num_send,
@@ -200,7 +208,7 @@ impl Encrypter {
             mac_key_recieve_len,
         );
 
-        Encrypter {
+        Ok(Encrypter {
             encrypt_alg,
             decrypt_alg,
             mac_alg_send,
@@ -216,9 +224,7 @@ impl Encrypter {
             packet_num_send,
             packet_num_recieve,
             session_id,
-        };
-
-        Ok(())
+        })
     }
 
     fn generate_key(
@@ -287,7 +293,7 @@ impl Encrypter {
         stream: &mut SshStream,
         host_key_alg: &'static str,
         mut hash_prefix: Vec<u8>,
-    ) -> Result<(Vec<u8>, Vec<u8>, impl Fn(&[u8]) -> Vec<u8>), Error> {
+    ) -> Result<(Vec<u8>, Vec<u8>, impl Fn(&[u8]) -> Vec<u8> + use<>), Error> {
         let secret = EphemeralSecret::random(&mut OsRng);
         let public = secret.public_key().to_sec1_bytes();
 

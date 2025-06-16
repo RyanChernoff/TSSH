@@ -62,7 +62,7 @@ impl SshStream {
     }
 
     /// Sends a single SSH packet with the given payload
-    pub fn send(&mut self, payload: &Vec<u8>) -> Result<(), Error> {
+    pub fn send(&mut self, payload: &[u8]) -> Result<(), Error> {
         let SshStream(stream) = self;
 
         // Min block size must be 8

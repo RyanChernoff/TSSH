@@ -84,7 +84,12 @@ pub fn run(args: Args) -> Result<(), Error> {
     // Set up SSH stream
     let mut stream = SshStream::new(stream);
 
-    exchange_keys(&mut stream, hash_prefix.clone())
+    // Exchange key information
+    let encrypter = exchange_keys(&mut stream, hash_prefix.clone())?;
+
+    // Begin authentication stage
+
+    Ok(())
 }
 
 /// Exchanges version information via the SSH-2.0 version exchange protocol over the given TCP stream
@@ -139,7 +144,7 @@ fn exchange_versions(stream: &mut TcpStream) -> Result<Vec<u8>, Error> {
 }
 
 /// Runs the secret key exchange portion of the SSH transport layer
-fn exchange_keys(stream: &mut SshStream, mut hash_prefix: Vec<u8>) -> Result<(), Error> {
+fn exchange_keys(stream: &mut SshStream, mut hash_prefix: Vec<u8>) -> Result<Encrypter, Error> {
     // Generate kexinit payload and add it to exchange hash prefix
     let payload = gen_kexinit_payload();
     SshStream::append_string(&mut hash_prefix, &payload);
@@ -222,9 +227,7 @@ fn exchange_keys(stream: &mut SshStream, mut hash_prefix: Vec<u8>) -> Result<(),
         compress_alg_recieve,
         hash_prefix,
         None,
-    )?;
-
-    Ok(())
+    )
 }
 
 /// Generates the payload for the ssh key exchange init packet
