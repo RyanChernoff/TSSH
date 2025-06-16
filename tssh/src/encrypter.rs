@@ -9,10 +9,17 @@ use rsa::{
 };
 use sha2::{Digest, Sha256, Sha512};
 
+/// Indicates successfule key exchange
 const SSH_MSG_NEWKEYS: u8 = 21;
+
+/// Indicates start of ecdh key exchange
 const SSH_MSG_KEX_ECDH_INIT: u8 = 30;
+
+/// Indicates end of ecdh key exchange
 const SSH_MSG_KEX_ECDH_REPLY: u8 = 31;
 
+/// A struct containing all information neccessary to encrypt, mac, and compress
+/// messages sent and recieved over an SSHStream.
 pub struct Encrypter {
     encrypt_alg: EncryptAlg,
     decrypt_alg: EncryptAlg,
@@ -31,15 +38,21 @@ pub struct Encrypter {
     session_id: Vec<u8>,
 }
 
+/// Enum representing all supported encryption algorithm types
 enum EncryptAlg {
+    /// Represents aes256-ctr algorithm
     Aes256Ctr,
 }
 
+/// Enum representing all supported mac algorithm types
 enum MacAlg {
+    /// Represents hmac-sha2-s56 algorithm
     HmacSha256,
 }
 
+/// Enum representing all supported compression algorithm types
 enum CompressAlg {
+    /// Represents no compression
     None,
 }
 
@@ -227,6 +240,8 @@ impl Encrypter {
         })
     }
 
+    /// Generates a new key based on the shared secret, exchange hash, session id, and byte value given in
+    /// accordance with SSH key generation. Creates a key of the specified length.
     fn generate_key(
         key: &[u8],
         exchange_hash: &[u8],
