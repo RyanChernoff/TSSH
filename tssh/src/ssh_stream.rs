@@ -170,7 +170,7 @@ impl SshStream {
 
     /// Appends an ssh name_list to a vector from a reference to an array
     pub fn append_string(payload: &mut Vec<u8>, string: &[u8]) {
-        let mut length: usize = string.len();
+        let length: usize = string.len();
 
         // Add length
         payload.extend((length as u32).to_be_bytes());

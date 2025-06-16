@@ -13,6 +13,8 @@ const SSH_MSG_KEX_ECDH_INIT: u8 = 30;
 const SSH_MSG_KEX_ECDH_REPLY: u8 = 31;
 
 pub struct Encrypter {
+    encrypt_alg: EncryptAlg,
+    decrypt_alg: EncryptAlg,
     iv_encrypt: Vec<u8>,
     iv_decrypt: Vec<u8>,
     encrypt_key: Vec<u8>,
@@ -21,6 +23,10 @@ pub struct Encrypter {
     mac_key_recieve: Vec<u8>,
     packet_num: u32,
     session_id: Vec<u8>,
+}
+
+enum EncryptAlg {
+    Aes256Ctr,
 }
 
 impl Encrypter {
@@ -39,13 +45,111 @@ impl Encrypter {
         hash_prefix: Vec<u8>,
         old: Option<Encrypter>,
     ) -> Result<(), Error> {
-        let (key, exchang_hash, hash_fn) = match key_exchange_alg {
+        let (key, exchange_hash, hash_fn) = match key_exchange_alg {
             "ecdh-sha2-nistp256" => {
                 Encrypter::ecdh_sha2_nistp256_exchange(stream, host_key_alg, hash_prefix)?
             }
-            _ => panic!("Made new encrypter for incompattible encryption algorithm"),
+            _ => {
+                return Err(Error::Other(
+                    "Made new encrypter for incompattible key exchange algorithm",
+                ));
+            }
         };
+
+        let session_id = match old {
+            Some(encrypter) => encrypter.session_id,
+            None => exchange_hash.clone(),
+        };
+
+        // Determine encryption information
+        let (iv_encrypt_len, encrypt_key_len, encrypt_alg) = match encrypt_alg {
+            "aes256-ctr" => (16usize, 32usize, EncryptAlg::Aes256Ctr),
+            _ => {
+                return Err(Error::Other(
+                    "Made new encrypter for incompattible encryption algorithm",
+                ));
+            }
+        };
+
+        // Determine decryption information
+        let (iv_decrypt_len, decrypt_key_len, decrypt_alg) = match decrypt_alg {
+            "aes256-ctr" => (16usize, 32usize, EncryptAlg::Aes256Ctr),
+            _ => {
+                return Err(Error::Other(
+                    "Made new encrypter for incompattible encryption algorithm",
+                ));
+            }
+        };
+
+        // Calculate encryption IV
+        let iv_encrypt = Encrypter::generate_key(
+            &key,
+            &exchange_hash,
+            'A' as u8,
+            &session_id,
+            &hash_fn,
+            iv_encrypt_len,
+        );
+
+        //Calculate decryption IV
+        let iv_decrypt = Encrypter::generate_key(
+            &key,
+            &exchange_hash,
+            'B' as u8,
+            &session_id,
+            &hash_fn,
+            iv_decrypt_len,
+        );
+
+        //Calculate encryption key
+        let encrypt_key = Encrypter::generate_key(
+            &key,
+            &exchange_hash,
+            'C' as u8,
+            &session_id,
+            &hash_fn,
+            encrypt_key_len,
+        );
+
+        //Calculate encryption key
+        let decrypt_key = Encrypter::generate_key(
+            &key,
+            &exchange_hash,
+            'D' as u8,
+            &session_id,
+            &hash_fn,
+            decrypt_key_len,
+        );
+
         Ok(())
+    }
+
+    fn generate_key(
+        key: &[u8],
+        exchange_hash: &[u8],
+        char: u8,
+        session_id: &[u8],
+        hash_fn: impl Fn(&[u8]) -> Vec<u8>,
+        output_len: usize,
+    ) -> Vec<u8> {
+        let mut hash_data = Vec::from(key);
+        hash_data.extend(exchange_hash);
+        hash_data.push(char);
+        hash_data.extend(session_id);
+
+        let mut result = hash_fn(&hash_data);
+
+        while result.len() < output_len {
+            let mut hash_data = Vec::from(key);
+            hash_data.extend(exchange_hash);
+            hash_data.extend(&result);
+
+            result.extend(hash_fn(&hash_data));
+        }
+
+        result.truncate(output_len);
+
+        result
     }
 
     /// Verifies an exchange hash (or any relavant message) with the host key and the specified
