@@ -192,21 +192,21 @@ fn exchange_keys(stream: &mut SshStream, mut hash_prefix: Vec<u8>) -> Result<(),
 
     let host_key_alg = negotiate_alg(&HOST_KEY_ALGS, &host_key_algs)?;
 
-    let encrypt_alg_cts = negotiate_alg(&ENCRYPT_ALGS, &encrypt_algs_cts)?;
-    let encrypt_alg_stc = negotiate_alg(&ENCRYPT_ALGS, &encrypt_algs_stc)?;
+    let encrypt_alg = negotiate_alg(&ENCRYPT_ALGS, &encrypt_algs_cts)?;
+    let decrypt_alg = negotiate_alg(&ENCRYPT_ALGS, &encrypt_algs_stc)?;
 
-    let mac_alg_cts = negotiate_alg(&MAC_ALGS, &mac_algs_cts)?;
-    let mac_alg_stc = negotiate_alg(&MAC_ALGS, &mac_algs_stc)?;
+    let mac_alg_send = negotiate_alg(&MAC_ALGS, &mac_algs_cts)?;
+    let mac_alg_recieve = negotiate_alg(&MAC_ALGS, &mac_algs_stc)?;
 
-    let compress_alg_cts = negotiate_alg(&COMPRESS_ALGS, &compress_algs_cts)?;
-    let compress_alg_stc = negotiate_alg(&COMPRESS_ALGS, &compress_algs_stc)?;
+    let compress_alg_send = negotiate_alg(&COMPRESS_ALGS, &compress_algs_cts)?;
+    let compress_alg_recieve = negotiate_alg(&COMPRESS_ALGS, &compress_algs_stc)?;
 
-    println!("{encrypt_alg_cts}");
-    println!("{encrypt_alg_stc}");
-    println!("{mac_alg_cts}");
-    println!("{mac_alg_stc}");
-    println!("{compress_alg_cts}");
-    println!("{compress_alg_stc}");
+    println!("{encrypt_alg}");
+    println!("{decrypt_alg}");
+    println!("{mac_alg_send}");
+    println!("{mac_alg_recieve}");
+    println!("{compress_alg_send}");
+    println!("{compress_alg_recieve}");
 
     // Normally you check for incorrect kex guesses here but the only implemented algorithm requires client to move first
 
@@ -214,13 +214,14 @@ fn exchange_keys(stream: &mut SshStream, mut hash_prefix: Vec<u8>) -> Result<(),
         stream,
         key_exchange_alg,
         host_key_alg,
-        encrypt_alg_cts,
-        encrypt_alg_stc,
-        mac_alg_cts,
-        mac_alg_stc,
-        compress_alg_cts,
-        compress_alg_stc,
+        encrypt_alg,
+        decrypt_alg,
+        mac_alg_send,
+        mac_alg_recieve,
+        compress_alg_send,
+        compress_alg_recieve,
         hash_prefix,
+        None,
     )?;
 
     Ok(())
