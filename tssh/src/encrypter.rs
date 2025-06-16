@@ -15,18 +15,31 @@ const SSH_MSG_KEX_ECDH_REPLY: u8 = 31;
 pub struct Encrypter {
     encrypt_alg: EncryptAlg,
     decrypt_alg: EncryptAlg,
+    mac_alg_send: MacAlg,
+    mac_alg_recieve: MacAlg,
+    compress_alg_send: CompressAlg,
+    compress_alg_recieve: CompressAlg,
     iv_encrypt: Vec<u8>,
     iv_decrypt: Vec<u8>,
     encrypt_key: Vec<u8>,
     decrypt_key: Vec<u8>,
     mac_key_send: Vec<u8>,
     mac_key_recieve: Vec<u8>,
-    packet_num: u32,
+    packet_num_send: u32,
+    packet_num_recieve: u32,
     session_id: Vec<u8>,
 }
 
 enum EncryptAlg {
     Aes256Ctr,
+}
+
+enum MacAlg {
+    HmacSha256,
+}
+
+enum CompressAlg {
+    None,
 }
 
 impl Encrypter {
@@ -45,22 +58,6 @@ impl Encrypter {
         hash_prefix: Vec<u8>,
         old: Option<Encrypter>,
     ) -> Result<(), Error> {
-        let (key, exchange_hash, hash_fn) = match key_exchange_alg {
-            "ecdh-sha2-nistp256" => {
-                Encrypter::ecdh_sha2_nistp256_exchange(stream, host_key_alg, hash_prefix)?
-            }
-            _ => {
-                return Err(Error::Other(
-                    "Made new encrypter for incompattible key exchange algorithm",
-                ));
-            }
-        };
-
-        let session_id = match old {
-            Some(encrypter) => encrypter.session_id,
-            None => exchange_hash.clone(),
-        };
-
         // Determine encryption information
         let (iv_encrypt_len, encrypt_key_len, encrypt_alg) = match encrypt_alg {
             "aes256-ctr" => (16usize, 32usize, EncryptAlg::Aes256Ctr),
@@ -79,6 +76,68 @@ impl Encrypter {
                     "Made new encrypter for incompattible encryption algorithm",
                 ));
             }
+        };
+
+        // Determine mac send information
+        let (mac_key_send_len, mac_alg_send) = match mac_alg_send {
+            "hmac-sha2-256" => (32usize, MacAlg::HmacSha256),
+            _ => {
+                return Err(Error::Other(
+                    "Made new encrypter for incompattible mac send algorithm",
+                ));
+            }
+        };
+
+        // Determine mac recieve information
+        let (mac_key_recieve_len, mac_alg_recieve) = match mac_alg_recieve {
+            "hmac-sha2-256" => (32usize, MacAlg::HmacSha256),
+            _ => {
+                return Err(Error::Other(
+                    "Made new encrypter for incompattible mac recieve algorithm",
+                ));
+            }
+        };
+
+        // Determine compression sending information
+        let compress_alg_send = match compress_alg_send {
+            "none" => CompressAlg::None,
+            _ => {
+                return Err(Error::Other(
+                    "Made new encrypter for incompattible compression send algorithm",
+                ));
+            }
+        };
+
+        // Determine compression sending information
+        let compress_alg_recieve = match compress_alg_recieve {
+            "none" => CompressAlg::None,
+            _ => {
+                return Err(Error::Other(
+                    "Made new encrypter for incompattible compression recieve algorithm",
+                ));
+            }
+        };
+
+        // Exchange secret keys
+        let (key, exchange_hash, hash_fn) = match key_exchange_alg {
+            "ecdh-sha2-nistp256" => {
+                Encrypter::ecdh_sha2_nistp256_exchange(stream, host_key_alg, hash_prefix)?
+            }
+            _ => {
+                return Err(Error::Other(
+                    "Made new encrypter for incompattible key exchange algorithm",
+                ));
+            }
+        };
+
+        // Extract info for key re-exchange
+        let (packet_num_send, packet_num_recieve, session_id) = match old {
+            Some(encrypter) => (
+                encrypter.packet_num_send,
+                encrypter.packet_num_recieve,
+                encrypter.session_id,
+            ),
+            None => (0, 0, exchange_hash.clone()),
         };
 
         // Calculate encryption IV
@@ -111,7 +170,7 @@ impl Encrypter {
             encrypt_key_len,
         );
 
-        //Calculate encryption key
+        //Calculate decryption key
         let decrypt_key = Encrypter::generate_key(
             &key,
             &exchange_hash,
@@ -120,6 +179,44 @@ impl Encrypter {
             &hash_fn,
             decrypt_key_len,
         );
+
+        //Calculate mac send key
+        let mac_key_send = Encrypter::generate_key(
+            &key,
+            &exchange_hash,
+            'E' as u8,
+            &session_id,
+            &hash_fn,
+            mac_key_send_len,
+        );
+
+        //Calculate mac recieve key
+        let mac_key_recieve = Encrypter::generate_key(
+            &key,
+            &exchange_hash,
+            'F' as u8,
+            &session_id,
+            &hash_fn,
+            mac_key_recieve_len,
+        );
+
+        Encrypter {
+            encrypt_alg,
+            decrypt_alg,
+            mac_alg_send,
+            mac_alg_recieve,
+            compress_alg_send,
+            compress_alg_recieve,
+            iv_encrypt,
+            iv_decrypt,
+            encrypt_key,
+            decrypt_key,
+            mac_key_send,
+            mac_key_recieve,
+            packet_num_send,
+            packet_num_recieve,
+            session_id,
+        };
 
         Ok(())
     }
