@@ -1,5 +1,13 @@
 use crate::Error;
 use crate::ssh_stream::SshStream;
+use aes::{
+    Aes256,
+    cipher::{
+        BlockEncrypt, KeyInit,
+        consts::{U16, U32},
+        generic_array::GenericArray,
+    },
+};
 use p256::{NistP256, ecdh::EphemeralSecret, elliptic_curve::PublicKey};
 use rand_core::OsRng;
 use rsa::{
@@ -411,6 +419,121 @@ impl Encrypter {
             Err(_) => Err(Error::Other(
                 "Failed to validate signature of exchange hash",
             )),
+        }
+    }
+
+    // Encryption and Decryption functions
+    pub fn encrypt(&mut self, plaintext: Vec<u8>) -> Result<Vec<u8>, Error> {
+        match self.encrypt_alg {
+            EncryptAlg::Aes256Ctr => self.aes256_ctr_encrypt(plaintext),
+        }
+    }
+
+    pub fn decrypt(&mut self, cyphertext: Vec<u8>) -> Result<Vec<u8>, Error> {
+        match self.encrypt_alg {
+            EncryptAlg::Aes256Ctr => self.aes256_ctr_decrypt(cyphertext),
+        }
+    }
+
+    /// Encrypts a plaintext vector using aes256-ctr according to ssh specifications
+    fn aes256_ctr_encrypt(&mut self, mut plaintext: Vec<u8>) -> Result<Vec<u8>, Error> {
+        // Check if plaintext is a multiple of the block size
+        if plaintext.len() % 16 != 0 {
+            return Err(Error::Other(
+                "Tried to encrypt block with bad size: Expected multiple of 16",
+            ));
+        }
+
+        // If plaintext is empty then we are done
+        if plaintext.len() == 0 {
+            return Ok(Vec::new());
+        }
+
+        // Check for valid key length
+        if self.encrypt_key.len() != 32 {
+            return Err(Error::Other(
+                "Tried to encrypt with invalid key length: Expect 32 bytes",
+            ));
+        }
+
+        // Check for valid iv length
+        if self.iv_encrypt.len() != 16 {
+            return Err(Error::Other(
+                "Tried to encrypt with invalid iv length: Expect 16 bytes",
+            ));
+        }
+
+        // Create cypher
+        let key: GenericArray<u8, U32> = GenericArray::clone_from_slice(&self.encrypt_key);
+        let cypher = Aes256::new(&key);
+
+        // Encrypt plaintext
+        for chunk in plaintext.chunks_mut(16) {
+            let mut block: GenericArray<u8, U16> = GenericArray::clone_from_slice(&self.iv_encrypt);
+            cypher.encrypt_block(&mut block);
+            for (c, k) in chunk.iter_mut().zip(block.iter()) {
+                *c ^= k;
+            }
+            Encrypter::incrament_counter(&mut self.iv_encrypt);
+        }
+
+        Ok(plaintext)
+    }
+
+    /// Decrypts a cyphertext vector using aes256-ctr according to ssh specifications
+    fn aes256_ctr_decrypt(&mut self, mut cyphertext: Vec<u8>) -> Result<Vec<u8>, Error> {
+        // Check if cyphertext is a multiple of the block size
+        if cyphertext.len() % 16 != 0 {
+            return Err(Error::Other(
+                "Tried to decrypt block with bad size: Expected multiple of 16",
+            ));
+        }
+
+        // If cyphertext is empty then we are done
+        if cyphertext.len() == 0 {
+            return Ok(Vec::new());
+        }
+
+        // Check for valid key length
+        if self.decrypt_key.len() != 32 {
+            return Err(Error::Other(
+                "Tried to decrypt with invalid key length: Expect 32 bytes",
+            ));
+        }
+
+        // Check for valid iv length
+        if self.iv_decrypt.len() != 16 {
+            return Err(Error::Other(
+                "Tried to decrypt with invalid iv length: Expect 16 bytes",
+            ));
+        }
+
+        // Create cypher
+        let key: GenericArray<u8, U32> = GenericArray::clone_from_slice(&self.decrypt_key);
+        let cypher = Aes256::new(&key);
+
+        // Encrypt plaintext
+        for chunk in cyphertext.chunks_mut(16) {
+            let mut block: GenericArray<u8, U16> = GenericArray::clone_from_slice(&self.iv_decrypt);
+            cypher.encrypt_block(&mut block);
+            for (p, k) in chunk.iter_mut().zip(block.iter()) {
+                *p ^= k;
+            }
+            Encrypter::incrament_counter(&mut self.iv_decrypt);
+        }
+
+        Ok(cyphertext)
+    }
+
+    /// Incraments a counter in the form of an array slice in place
+    fn incrament_counter(counter: &mut [u8]) {
+        for digit in counter.iter_mut().rev() {
+            if *digit == 0xFF {
+                *digit = 0;
+            } else {
+                *digit += 1;
+                return;
+            }
         }
     }
 }
