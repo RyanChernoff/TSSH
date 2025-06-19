@@ -8,6 +8,7 @@ use aes::{
         generic_array::GenericArray,
     },
 };
+use hmac::{Hmac, Mac};
 use p256::{NistP256, ecdh::EphemeralSecret, elliptic_curve::PublicKey};
 use rand_core::OsRng;
 use rsa::{
@@ -423,12 +424,15 @@ impl Encrypter {
     }
 
     // Encryption and Decryption functions
+
+    /// Encrypts a plaintext vector for sending over ssh
     pub fn encrypt(&mut self, plaintext: Vec<u8>) -> Result<Vec<u8>, Error> {
         match self.encrypt_alg {
             EncryptAlg::Aes256Ctr => self.aes256_ctr_encrypt(plaintext),
         }
     }
 
+    /// decrypts a cyphertext vector recieved over an ssh stream
     pub fn decrypt(&mut self, cyphertext: Vec<u8>) -> Result<Vec<u8>, Error> {
         match self.encrypt_alg {
             EncryptAlg::Aes256Ctr => self.aes256_ctr_decrypt(cyphertext),
@@ -534,6 +538,59 @@ impl Encrypter {
                 *digit += 1;
                 return;
             }
+        }
+    }
+
+    // Mac functions
+
+    /// Generates a mac for a message
+    pub fn mac(&mut self, message: &[u8]) -> Vec<u8> {
+        let result = match self.mac_alg_send {
+            MacAlg::HmacSha256 => self.hmac_sha256_mac(message),
+        };
+        self.packet_num_send += 1;
+        result
+    }
+
+    /// Verifies a mac for a message
+    pub fn verify(&mut self, message: &[u8], mac: &[u8]) -> bool {
+        let result = match self.mac_alg_recieve {
+            MacAlg::HmacSha256 => self.hmac_sha256_verify(message, mac),
+        };
+        self.packet_num_recieve += 1;
+        result
+    }
+
+    /// Uses hmac-sha2-256 to generate a mac for a message
+    fn hmac_sha256_mac(&mut self, message: &[u8]) -> Vec<u8> {
+        // Create message to mac
+        let mut mac_message: Vec<u8> = Vec::from(self.packet_num_send.to_be_bytes());
+        mac_message.extend(message);
+
+        // Mac message
+        let mut mac = <Hmac<Sha256> as hmac::digest::KeyInit>::new_from_slice(&self.mac_key_send)
+            .expect("HMAC can take key of any size");
+        mac.update(&mac_message);
+        let result = mac.finalize();
+
+        result.into_bytes().to_vec()
+    }
+
+    /// Uses hmac-sha2-256 to verify a mac on a message
+    fn hmac_sha256_verify(&mut self, message: &[u8], mac: &[u8]) -> bool {
+        // Create message to verify
+        let mut mac_message: Vec<u8> = Vec::from(self.packet_num_recieve.to_be_bytes());
+        mac_message.extend(message);
+
+        // Verify message
+        let mut verifyer =
+            <Hmac<Sha256> as hmac::digest::KeyInit>::new_from_slice(&self.mac_key_recieve)
+                .expect("HMAC can take key of any size");
+        verifyer.update(&mac_message);
+
+        match verifyer.verify_slice(mac) {
+            Ok(()) => true,
+            Err(_) => false,
         }
     }
 }

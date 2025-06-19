@@ -512,6 +512,7 @@ name = "tssh"
 version = "0.1.0"
 dependencies = [
  "aes",
+ "hmac",
  "p256",
  "rand",
  "rand_core",
