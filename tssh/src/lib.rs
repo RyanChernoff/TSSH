@@ -88,6 +88,7 @@ pub fn run(args: Args) -> Result<(), Error> {
     let encrypter = exchange_keys(&mut stream, hash_prefix.clone())?;
 
     // Begin authentication stage
+    stream.send(b"\x05\x00\x00\x00\x0cssh-userauth", &mut Some(encrypter))?;
 
     Ok(())
 }
@@ -150,10 +151,10 @@ fn exchange_keys(stream: &mut SshStream, mut hash_prefix: Vec<u8>) -> Result<Enc
     SshStream::append_string(&mut hash_prefix, &payload);
 
     // Send key negotiation information
-    stream.send(&payload)?;
+    stream.send(&payload, &mut None)?;
 
     // Wait until recieved key exchange packet each packet
-    let mut packet = stream.read_until(SSH_MSG_KEXINIT)?;
+    let (mut packet, num_read) = stream.read_until_no_encrypter(SSH_MSG_KEXINIT)?;
 
     // Ensure packet can be a key exchange packet
     if packet.len() < 61 {
@@ -206,11 +207,8 @@ fn exchange_keys(stream: &mut SshStream, mut hash_prefix: Vec<u8>) -> Result<Enc
     let compress_alg = negotiate_alg(&COMPRESS_ALGS, &compress_algs_cts)?;
     let decompress_alg = negotiate_alg(&COMPRESS_ALGS, &compress_algs_stc)?;
 
-    println!("{encrypt_alg}");
     println!("{decrypt_alg}");
-    println!("{mac_alg_send}");
     println!("{mac_alg_recieve}");
-    println!("{compress_alg}");
     println!("{decompress_alg}");
 
     // Normally you check for incorrect kex guesses here but the only implemented algorithm requires client to move first
@@ -226,6 +224,7 @@ fn exchange_keys(stream: &mut SshStream, mut hash_prefix: Vec<u8>) -> Result<Enc
         compress_alg,
         decompress_alg,
         hash_prefix,
+        num_read,
         None,
     )
 }

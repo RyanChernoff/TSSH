@@ -1,4 +1,5 @@
-use crate::{Error, SSH_MSG_DISCONNECT};
+use crate::encrypter::Encrypter;
+use crate::{Error, SSH_MSG_DISCONNECT, encrypter};
 use rsa::BigUint;
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -62,11 +63,20 @@ impl SshStream {
     }
 
     /// Sends a single SSH packet with the given payload
-    pub fn send(&mut self, payload: &[u8]) -> Result<(), Error> {
+    pub fn send(&mut self, payload: &[u8], encrypter: &mut Option<Encrypter>) -> Result<(), Error> {
         let SshStream(stream) = self;
 
-        // Min block size must be 8
-        let block_size = 8;
+        // Compress payload
+        let payload = match encrypter {
+            Some(enc) => &enc.compress(payload),
+            None => payload,
+        };
+
+        // Calculate block size
+        let block_size = match encrypter {
+            Some(enc) => enc.encrypt_block_size(),
+            None => 8,
+        };
 
         // Get payload length
         let payload_length = payload.len() as u32;
@@ -78,7 +88,7 @@ impl SshStream {
         }
 
         // Fill padding with 0's
-        let padding: Vec<u8> = (0..padding_length).collect();
+        let padding: Vec<u8> = vec![0u8; padding_length as usize];
 
         // Calculate the total packet length (excluding this field and the mac field)
         let packet_length = payload_length + (padding_length as u32) + 1;
@@ -90,22 +100,43 @@ impl SshStream {
         packet.extend(payload);
         packet.extend(padding);
 
+        // Create mac for packet
+        let mac = match encrypter {
+            Some(enc) => enc.mac(&packet),
+            None => vec![],
+        };
+
+        // Encrypt packet
+
+        let packet = match encrypter {
+            Some(enc) => enc.encrypt(packet)?,
+            None => packet,
+        };
+
         // Send packet
         stream.write_all(&packet)?;
+
+        // Send mac
+        stream.write_all(&mac)?;
 
         Ok(())
     }
 
     /// Continuously reads SSH packets until it finds one with an ssh code that matches
     /// the wait type. If it runs into an SSH_MSG_DISCONNECT packet it returns with an error.
-    pub fn read_until(&mut self, wait_type: u8) -> Result<Vec<u8>, Error> {
+    /// Returns the number of messages read as this needs to be tracked
+    pub fn read_until_no_encrypter(&mut self, wait_type: u8) -> Result<(Vec<u8>, u32), Error> {
+        let mut num_read = 0;
         loop {
             // Read next packet
             let (packet_type, packet) = self.read()?;
 
+            // Update counter
+            num_read += 1;
+
             // Check if recieved desired packet
             if packet_type == wait_type {
-                return Ok(packet);
+                return Ok((packet, num_read));
             }
 
             // Check if recieved disconnect

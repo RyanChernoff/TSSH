@@ -94,7 +94,8 @@ impl Encrypter {
         compress_alg: &'static str,
         decompress_alg: &'static str,
         hash_prefix: Vec<u8>,
-        old: Option<Encrypter>,
+        mut num_read: u32,
+        mut old: Option<Encrypter>,
     ) -> Result<Self, Error> {
         // Determine encryption information
         let (iv_encrypt_len, encrypt_key_len, encrypt_alg) = match encrypt_alg {
@@ -158,9 +159,13 @@ impl Encrypter {
 
         // Exchange secret keys
         let (key, exchange_hash, hash_fn) = match key_exchange_alg {
-            "ecdh-sha2-nistp256" => {
-                Encrypter::ecdh_sha2_nistp256_exchange(stream, host_key_alg, hash_prefix)?
-            }
+            "ecdh-sha2-nistp256" => Encrypter::ecdh_sha2_nistp256_exchange(
+                stream,
+                host_key_alg,
+                hash_prefix,
+                &mut num_read,
+                &mut old,
+            )?,
             _ => {
                 return Err(Error::Other(
                     "Made new encrypter for incompattible key exchange algorithm",
@@ -169,8 +174,9 @@ impl Encrypter {
         };
 
         // Send and recieve the SSH_MSG_NEWKEYS message to validate successfule key exchange
-        stream.send(&[SSH_MSG_NEWKEYS])?;
-        let recieved = stream.read_until(SSH_MSG_NEWKEYS)?;
+        stream.send(&[SSH_MSG_NEWKEYS], &mut old)?;
+        let (recieved, new_read) = stream.read_until_no_encrypter(SSH_MSG_NEWKEYS)?;
+        num_read += new_read;
         if recieved.len() > 0 {
             return Err(Error::Other("Recieved invalid SSH_MSG_NEWKEYS message"));
         }
@@ -182,7 +188,7 @@ impl Encrypter {
                 encrypter.packet_num_recieve,
                 encrypter.session_id,
             ),
-            None => (0, 0, exchange_hash.clone()),
+            None => (3, num_read, exchange_hash.clone()),
         };
 
         // Calculate encryption IV
@@ -274,7 +280,8 @@ impl Encrypter {
         hash_fn: impl Fn(&[u8]) -> Vec<u8>,
         output_len: usize,
     ) -> Vec<u8> {
-        let mut hash_data = Vec::from(key);
+        let mut hash_data = Vec::new();
+        SshStream::append_mpint(&mut hash_data, key, true);
         hash_data.extend(exchange_hash);
         hash_data.push(char);
         hash_data.extend(session_id);
@@ -332,6 +339,8 @@ impl Encrypter {
         stream: &mut SshStream,
         host_key_alg: &'static str,
         mut hash_prefix: Vec<u8>,
+        num_read: &mut u32,
+        old: &mut Option<Encrypter>,
     ) -> Result<(Vec<u8>, Vec<u8>, impl Fn(&[u8]) -> Vec<u8> + use<>), Error> {
         let secret = EphemeralSecret::random(&mut OsRng);
         let public = secret.public_key().to_sec1_bytes();
@@ -339,9 +348,10 @@ impl Encrypter {
         let mut ecdh_init = vec![SSH_MSG_KEX_ECDH_INIT];
         SshStream::append_string(&mut ecdh_init, &*public);
 
-        stream.send(&ecdh_init)?;
+        stream.send(&ecdh_init, old)?;
 
-        let reply = stream.read_until(SSH_MSG_KEX_ECDH_REPLY)?;
+        let (reply, new_read) = stream.read_until_no_encrypter(SSH_MSG_KEX_ECDH_REPLY)?;
+        *num_read += new_read;
 
         let (host_key, reply) = SshStream::extract_string(&reply)?;
         let (server_public, reply) = SshStream::extract_string(&reply)?;
@@ -439,6 +449,12 @@ impl Encrypter {
         }
     }
 
+    pub fn encrypt_block_size(&self) -> u32 {
+        match self.encrypt_alg {
+            EncryptAlg::Aes256Ctr => 16,
+        }
+    }
+
     /// Encrypts a plaintext vector using aes256-ctr according to ssh specifications
     fn aes256_ctr_encrypt(&mut self, mut plaintext: Vec<u8>) -> Result<Vec<u8>, Error> {
         // Check if plaintext is a multiple of the block size
@@ -478,7 +494,7 @@ impl Encrypter {
             for (c, k) in chunk.iter_mut().zip(block.iter()) {
                 *c ^= k;
             }
-            Encrypter::incrament_counter(&mut self.iv_encrypt);
+            Encrypter::increment_counter(&mut self.iv_encrypt);
         }
 
         Ok(plaintext)
@@ -523,14 +539,14 @@ impl Encrypter {
             for (p, k) in chunk.iter_mut().zip(block.iter()) {
                 *p ^= k;
             }
-            Encrypter::incrament_counter(&mut self.iv_decrypt);
+            Encrypter::increment_counter(&mut self.iv_decrypt);
         }
 
         Ok(cyphertext)
     }
 
     /// Incraments a counter in the form of an array slice in place
-    fn incrament_counter(counter: &mut [u8]) {
+    fn increment_counter(counter: &mut [u8]) {
         for digit in counter.iter_mut().rev() {
             if *digit == 0xFF {
                 *digit = 0;
@@ -597,16 +613,16 @@ impl Encrypter {
     // Compression functions
 
     /// Uses the negotiated compression algorithm to compress a payload
-    pub fn compress(&self, payload: Vec<u8>) -> Vec<u8> {
+    pub fn compress(&self, payload: &[u8]) -> Vec<u8> {
         match self.compress_alg {
-            CompressAlg::None => payload,
+            CompressAlg::None => payload.to_vec(),
         }
     }
 
     /// Uses the negotiated compression algorithm to decompress a payload
-    pub fn decompress(&self, payload: Vec<u8>) -> Vec<u8> {
+    pub fn decompress(&self, payload: &[u8]) -> Vec<u8> {
         match self.decompress_alg {
-            CompressAlg::None => payload,
+            CompressAlg::None => payload.to_vec(),
         }
     }
 }
