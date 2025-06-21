@@ -593,4 +593,20 @@ impl Encrypter {
             Err(_) => false,
         }
     }
+
+    // Compression functions
+
+    /// Uses the negotiated compression algorithm to compress a payload
+    pub fn compress(&self, payload: Vec<u8>) -> Vec<u8> {
+        match self.compress_alg {
+            CompressAlg::None => payload,
+        }
+    }
+
+    /// Uses the negotiated compression algorithm to decompress a payload
+    pub fn decompress(&self, payload: Vec<u8>) -> Vec<u8> {
+        match self.decompress_alg {
+            CompressAlg::None => payload,
+        }
+    }
 }
