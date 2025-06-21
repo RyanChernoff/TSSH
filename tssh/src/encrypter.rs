@@ -449,6 +449,7 @@ impl Encrypter {
         }
     }
 
+    /// Returns the block size needed for the encryption algorithm
     pub fn encrypt_block_size(&self) -> u32 {
         match self.encrypt_alg {
             EncryptAlg::Aes256Ctr => 16,

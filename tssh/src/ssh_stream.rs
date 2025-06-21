@@ -210,6 +210,8 @@ impl SshStream {
         payload.extend(string);
     }
 
+    /// Returns one unsigned mpint from an ssh packet and the remains of the packet
+    /// after the end of the mpint.
     pub fn extract_mpint_unsigned(start: &[u8]) -> Result<(BigUint, &[u8]), Error> {
         // extract list length
         let num_length = u32::from_be_bytes((&start[0..4]).try_into()?) as usize;
