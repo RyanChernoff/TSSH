@@ -15,6 +15,10 @@ use std::net::TcpStream;
 const SSH_MSG_DISCONNECT: u8 = 1;
 /// Indicates that a pecket contains key exchange negotiation info
 const SSH_MSG_KEXINIT: u8 = 20;
+/// Indicates that a packet is a request for a specific service
+const SSH_MSG_SERVICE_REQUEST: u8 = 5;
+/// Indicates that a packet is accepting a request for a service
+const SSH_MSG_SERVICE_ACCEPT: u8 = 6;
 
 /// List of supported key exchange algorithms
 const KEX_ALGS: [&'static str; 1] = ["ecdh-sha2-nistp256"];
@@ -85,10 +89,10 @@ pub fn run(args: Args) -> Result<(), Error> {
     let mut stream = SshStream::new(stream);
 
     // Exchange key information
-    let encrypter = exchange_keys(&mut stream, hash_prefix.clone())?;
+    let mut encrypter = exchange_keys(&mut stream, hash_prefix.clone())?;
 
     // Begin authentication stage
-    stream.send(b"\x05\x00\x00\x00\x0cssh-userauth", &mut Some(encrypter))?;
+    authenticate(&mut stream, &mut encrypter)?;
 
     Ok(())
 }
@@ -151,7 +155,7 @@ fn exchange_keys(stream: &mut SshStream, mut hash_prefix: Vec<u8>) -> Result<Enc
     SshStream::append_string(&mut hash_prefix, &payload);
 
     // Send key negotiation information
-    stream.send(&payload, &mut None)?;
+    stream.send(&payload, None)?;
 
     // Wait until recieved key exchange packet each packet
     let (mut packet, num_read) = stream.read_until_no_encrypter(SSH_MSG_KEXINIT)?;
@@ -207,10 +211,6 @@ fn exchange_keys(stream: &mut SshStream, mut hash_prefix: Vec<u8>) -> Result<Enc
     let compress_alg = negotiate_alg(&COMPRESS_ALGS, &compress_algs_cts)?;
     let decompress_alg = negotiate_alg(&COMPRESS_ALGS, &compress_algs_stc)?;
 
-    println!("{decrypt_alg}");
-    println!("{mac_alg_recieve}");
-    println!("{decompress_alg}");
-
     // Normally you check for incorrect kex guesses here but the only implemented algorithm requires client to move first
 
     Encrypter::new(
@@ -227,6 +227,20 @@ fn exchange_keys(stream: &mut SshStream, mut hash_prefix: Vec<u8>) -> Result<Enc
         num_read,
         None,
     )
+}
+
+fn authenticate(stream: &mut SshStream, encrypter: &mut Encrypter) -> Result<(), Error> {
+    // Request user authentication
+    stream.send(b"\x05\x00\x00\x00\x0cssh-userauth", Some(encrypter))?;
+    let payload = stream.read_until(SSH_MSG_SERVICE_ACCEPT, encrypter)?;
+    let (service, _) = SshStream::extract_string(&payload)?;
+    if service != b"ssh-userauth" {
+        return Err(Error::Other(
+            "Invalid service accept message: Expected ssh-userauth",
+        ));
+    }
+
+    Ok(())
 }
 
 /// Generates the payload for the ssh key exchange init packet

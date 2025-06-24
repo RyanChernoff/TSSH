@@ -17,15 +17,25 @@ impl SshStream {
     /// Requires that the packet (not just the buffer that contains it) meet
     /// the minimum length requirement of 16 bytes and the maximum length requirement
     /// of 35000 bytes.
-    pub fn read(&mut self) -> Result<(u8, Vec<u8>), Error> {
+    pub fn read(&mut self, mut encrypter: Option<&mut Encrypter>) -> Result<(u8, Vec<u8>), Error> {
         let SshStream(stream) = self;
 
-        // Get padding length
-        let mut len_buf: [u8; 4] = [0; 4];
-        stream.read_exact(&mut len_buf)?;
+        // Get the first block of the packet
+        let block_size = match &encrypter {
+            Some(enc) => enc.decrypt_block_size() as usize,
+            None => 8,
+        };
+        let mut packet: Vec<u8> = vec![0; block_size];
+        stream.read_exact(&mut packet)?;
+
+        // Decrypt first block of packet
+        let mut packet = match &mut encrypter {
+            Some(enc) => enc.decrypt(packet)?,
+            None => packet,
+        };
 
         // Extract the packet length
-        let packet_length: usize = u32::from_be_bytes(len_buf) as usize;
+        let packet_length: usize = u32::from_be_bytes((&packet[0..4]).try_into()?) as usize;
         if packet_length < 12 {
             return Err(Error::Other(
                 "Packet length is too small: Expected at least 12 bytes",
@@ -36,13 +46,25 @@ impl SshStream {
                 "Packet length is too largs: Expected at most 35000 bytes",
             ));
         }
+        if packet_length + 4 % block_size == 0 {
+            return Err(Error::Other(
+                "Packet length is not a multiple of the block size",
+            ));
+        }
 
         // Get rest of packet
-        let mut packet = vec![0u8; packet_length];
-        stream.read_exact(&mut packet)?;
+        let mut rest: Vec<u8> = vec![0; packet_length - block_size + 4];
+        stream.read_exact(&mut rest)?;
+
+        // Decrypt rest
+        let rest = match &mut encrypter {
+            Some(enc) => enc.decrypt(rest)?,
+            None => rest,
+        };
+        packet.extend(rest);
 
         // Extract padding length
-        let padding_length: usize = packet[0] as usize;
+        let padding_length: usize = packet[4] as usize;
         if padding_length < 4 {
             return Err(Error::Other(
                 "Packet has too little padding: Expected at least 4",
@@ -54,26 +76,43 @@ impl SshStream {
             ));
         }
 
-        // Get the slice containing the payload and its packet type
-        packet.remove(0);
-        let packet_type = packet.remove(0);
+        if let Some(enc) = &mut encrypter {
+            // Get mac
+            let mut mac: Vec<u8> = vec![0; enc.verify_length()];
+            stream.read_exact(&mut mac)?;
+
+            // Verify packet
+            if !enc.verify(&packet, &mac) {
+                return Err(Error::Other(
+                    "Invalid mac on recieved packet: Packet Corrupted",
+                ));
+            }
+        }
+
         let payload_length = (packet_length - padding_length - 2) as usize;
-        packet.truncate(payload_length);
-        Ok((packet_type, packet))
+        let payload = &packet[5..(6 + payload_length)];
+        let mut payload = match encrypter {
+            Some(enc) => enc.decompress(payload),
+            None => payload.to_vec(),
+        };
+
+        // Get the slice containing the payload and its packet type
+        let packet_type = payload.remove(0);
+        Ok((packet_type, payload))
     }
 
     /// Sends a single SSH packet with the given payload
-    pub fn send(&mut self, payload: &[u8], encrypter: &mut Option<Encrypter>) -> Result<(), Error> {
+    pub fn send(&mut self, payload: &[u8], encrypter: Option<&mut Encrypter>) -> Result<(), Error> {
         let SshStream(stream) = self;
 
         // Compress payload
-        let payload = match encrypter {
+        let payload = match &encrypter {
             Some(enc) => &enc.compress(payload),
             None => payload,
         };
 
         // Calculate block size
-        let block_size = match encrypter {
+        let block_size = match &encrypter {
             Some(enc) => enc.encrypt_block_size(),
             None => 8,
         };
@@ -100,17 +139,14 @@ impl SshStream {
         packet.extend(payload);
         packet.extend(padding);
 
-        // Create mac for packet
-        let mac = match encrypter {
-            Some(enc) => enc.mac(&packet),
-            None => vec![],
-        };
-
-        // Encrypt packet
-
-        let packet = match encrypter {
-            Some(enc) => enc.encrypt(packet)?,
-            None => packet,
+        // Create mac and encrypt packet
+        let (packet, mac) = match encrypter {
+            Some(enc) => {
+                let m = enc.mac(&packet);
+                let p = enc.encrypt(packet)?;
+                (p, m)
+            }
+            None => (packet, vec![]),
         };
 
         // Send packet
@@ -129,7 +165,7 @@ impl SshStream {
         let mut num_read = 0;
         loop {
             // Read next packet
-            let (packet_type, packet) = self.read()?;
+            let (packet_type, packet) = self.read(None)?;
 
             // Update counter
             num_read += 1;
@@ -137,6 +173,27 @@ impl SshStream {
             // Check if recieved desired packet
             if packet_type == wait_type {
                 return Ok((packet, num_read));
+            }
+
+            // Check if recieved disconnect
+            if packet_type == SSH_MSG_DISCONNECT {
+                return Err(Error::Other("Host sent ssh disconnect message"));
+            }
+        }
+    }
+
+    pub fn read_until(
+        &mut self,
+        wait_type: u8,
+        encrypter: &mut Encrypter,
+    ) -> Result<Vec<u8>, Error> {
+        loop {
+            // Read next packet
+            let (packet_type, packet) = self.read(Some(encrypter))?;
+
+            // Check if recieved desired packet
+            if packet_type == wait_type {
+                return Ok(packet);
             }
 
             // Check if recieved disconnect

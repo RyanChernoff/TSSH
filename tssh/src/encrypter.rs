@@ -55,9 +55,9 @@ pub struct Encrypter {
     /// Key for verifying messages
     mac_key_recieve: Vec<u8>,
     /// Number of packets sent (after initial key exchange)
-    packet_num_send: u32,
+    pub packet_num_send: u32,
     /// Number of packets recieved (after initial key exchange)
-    packet_num_recieve: u32,
+    pub packet_num_recieve: u32,
     /// Unique identifier for the ssh session
     session_id: Vec<u8>,
 }
@@ -174,7 +174,7 @@ impl Encrypter {
         };
 
         // Send and recieve the SSH_MSG_NEWKEYS message to validate successfule key exchange
-        stream.send(&[SSH_MSG_NEWKEYS], &mut old)?;
+        stream.send(&[SSH_MSG_NEWKEYS], old.as_mut())?;
         let (recieved, new_read) = stream.read_until_no_encrypter(SSH_MSG_NEWKEYS)?;
         num_read += new_read;
         if recieved.len() > 0 {
@@ -348,7 +348,7 @@ impl Encrypter {
         let mut ecdh_init = vec![SSH_MSG_KEX_ECDH_INIT];
         SshStream::append_string(&mut ecdh_init, &*public);
 
-        stream.send(&ecdh_init, old)?;
+        stream.send(&ecdh_init, old.as_mut())?;
 
         let (reply, new_read) = stream.read_until_no_encrypter(SSH_MSG_KEX_ECDH_REPLY)?;
         *num_read += new_read;
@@ -452,6 +452,13 @@ impl Encrypter {
     /// Returns the block size needed for the encryption algorithm
     pub fn encrypt_block_size(&self) -> u32 {
         match self.encrypt_alg {
+            EncryptAlg::Aes256Ctr => 16,
+        }
+    }
+
+    /// Returns the block size needed for the encryption algorithm
+    pub fn decrypt_block_size(&self) -> u32 {
+        match self.decrypt_alg {
             EncryptAlg::Aes256Ctr => 16,
         }
     }
@@ -576,6 +583,13 @@ impl Encrypter {
         };
         self.packet_num_recieve += 1;
         result
+    }
+
+    /// The length of the mac expected by verify
+    pub fn verify_length(&self) -> usize {
+        match self.mac_alg_recieve {
+            MacAlg::HmacSha256 => 32,
+        }
     }
 
     /// Uses hmac-sha2-256 to generate a mac for a message
