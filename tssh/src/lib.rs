@@ -42,7 +42,7 @@ const COMPRESS_ALGS: [&'static str; 1] = ["none"];
 /// The arguments used when first run
 pub struct Args<'a> {
     /// The username to sign in as via SSH
-    pub username: &'a str,
+    pub username: String,
     /// The name or ip adress of the host server for
     /// establishing TCP/IP connection
     pub hostname: &'a str,

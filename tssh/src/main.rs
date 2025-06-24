@@ -1,4 +1,6 @@
 use std::env;
+use std::io;
+use std::io::Write;
 use tssh::Args;
 
 /// Extracts username and hostname and passes it to tssh for processing and prints any runtime errors
@@ -36,14 +38,23 @@ fn parse_args<'a>(cmd_line: &'a Vec<String>) -> Option<Args<'a>> {
     // username and hostname were specified
     if args.len() == 2 {
         return Some(Args {
-            username: args[0],
+            username: args[0].to_string(),
             hostname: args[1],
         });
     }
 
     // username was not specified
+    print!("Username: ");
+    io::stdout()
+        .flush()
+        .expect("Failed to print username prompt");
+    let mut username = String::new();
+    io::stdin()
+        .read_line(&mut username)
+        .expect("Failed to read line");
+
     Some(Args {
-        username: "",
+        username,
         hostname: args[0],
     })
 }
