@@ -19,6 +19,8 @@ const SSH_MSG_KEXINIT: u8 = 20;
 const SSH_MSG_SERVICE_REQUEST: u8 = 5;
 /// Indicates that a packet is accepting a request for a service
 const SSH_MSG_SERVICE_ACCEPT: u8 = 6;
+// Indicates that a packet is request user authentication
+const SSH_USERAUTH_REQUEST: u8 = 50;
 
 /// List of supported key exchange algorithms
 const KEX_ALGS: [&'static str; 1] = ["ecdh-sha2-nistp256"];
@@ -92,7 +94,7 @@ pub fn run(args: Args) -> Result<(), Error> {
     let mut encrypter = exchange_keys(&mut stream, hash_prefix.clone())?;
 
     // Begin authentication stage
-    authenticate(&mut stream, &mut encrypter)?;
+    authenticate(&mut stream, &mut encrypter, args.username)?;
 
     Ok(())
 }
@@ -229,7 +231,11 @@ fn exchange_keys(stream: &mut SshStream, mut hash_prefix: Vec<u8>) -> Result<Enc
     )
 }
 
-fn authenticate(stream: &mut SshStream, encrypter: &mut Encrypter) -> Result<(), Error> {
+fn authenticate(
+    stream: &mut SshStream,
+    encrypter: &mut Encrypter,
+    username: String,
+) -> Result<(), Error> {
     // Request user authentication
     stream.send(b"\x05\x00\x00\x00\x0cssh-userauth", Some(encrypter))?;
     let payload = stream.read_until(SSH_MSG_SERVICE_ACCEPT, encrypter)?;
@@ -239,6 +245,10 @@ fn authenticate(stream: &mut SshStream, encrypter: &mut Encrypter) -> Result<(),
             "Invalid service accept message: Expected ssh-userauth",
         ));
     }
+
+    let mut initial_request = gen_userauth_header(&username);
+    SshStream::append_string(&mut initial_request, b"none");
+    stream.send(&initial_request, Some(encrypter))?;
 
     Ok(())
 }
@@ -281,4 +291,12 @@ fn negotiate_alg(client: &[&'static str], server: &Vec<String>) -> Result<&'stat
         Some(alg) => Ok(*alg),
         None => return Err(Error::Other("Could not find compatible algorithms")),
     }
+}
+
+fn gen_userauth_header(username: &str) -> Vec<u8> {
+    let mut header = Vec::new();
+    header.push(SSH_USERAUTH_REQUEST);
+    SshStream::append_string(&mut header, username.as_bytes());
+    SshStream::append_string(&mut header, b"ssh-connection");
+    header
 }

@@ -54,7 +54,7 @@ fn parse_args<'a>(cmd_line: &'a Vec<String>) -> Option<Args<'a>> {
         .expect("Failed to read line");
 
     Some(Args {
-        username,
+        username: username.trim().to_string(),
         hostname: args[0],
     })
 }
