@@ -4,6 +4,7 @@ mod ssh_stream;
 use encrypter::Encrypter;
 use rand::Rng;
 use rand_core::OsRng;
+use rpassword;
 use ssh_stream::SshStream;
 use std::array::TryFromSliceError;
 use std::fmt;
@@ -281,20 +282,14 @@ fn authenticate(
                 attempt_counter += 1;
 
                 // Prompt user for password
-                print!("Password: ");
-                io::stdout()
-                    .flush()
-                    .expect("Failed to print password prompt");
-                let mut password = String::new();
-                io::stdin()
-                    .read_line(&mut password)
-                    .expect("Failed to read line");
+                let password =
+                    rpassword::prompt_password("Password: ").expect("Unable to parse password");
 
                 // Send authentication request
                 let mut request = gen_userauth_header(&username);
                 SshStream::append_string(&mut request, b"password");
                 request.push(0); // false boolean field
-                SshStream::append_string(&mut request, password.trim().as_bytes());
+                SshStream::append_string(&mut request, password.as_bytes());
                 stream.send(&request, Some(encrypter))?;
             }
             SSH_MSG_USERAUTH_BANNER => {
