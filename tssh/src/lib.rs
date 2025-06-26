@@ -19,8 +19,16 @@ const SSH_MSG_KEXINIT: u8 = 20;
 const SSH_MSG_SERVICE_REQUEST: u8 = 5;
 /// Indicates that a packet is accepting a request for a service
 const SSH_MSG_SERVICE_ACCEPT: u8 = 6;
-// Indicates that a packet is request user authentication
+/// Indicates that a packet is requesting user authentication
 const SSH_USERAUTH_REQUEST: u8 = 50;
+/// Indicates that a packet is responding to a failed authentication attempt
+const SSH_MSG_USERAUTH_FAILURE: u8 = 51;
+/// Indicates that a packet is responding to a successful authentication attempt
+const SSH_MSG_USERAUTH_SUCCESS: u8 = 52;
+/// Indicates that a packet contains a special banner to display to the user
+const SSH_MSG_USERAUTH_BANNER: u8 = 53;
+/// Indicates that a user tried to authenticate with an expired passwords and needs to change it
+const SSH_MSG_USERAUTH_PASSWD_CHANGEREQ: u8 = 60;
 
 /// List of supported key exchange algorithms
 const KEX_ALGS: [&'static str; 1] = ["ecdh-sha2-nistp256"];
@@ -246,11 +254,62 @@ fn authenticate(
         ));
     }
 
+    // Send initial request to get authentication methods
     let mut initial_request = gen_userauth_header(&username);
     SshStream::append_string(&mut initial_request, b"none");
     stream.send(&initial_request, Some(encrypter))?;
 
-    Ok(())
+    // Get response from host
+    let mut attempt_counter: u8 = 0;
+    loop {
+        let (code, response) = stream.read(Some(encrypter))?;
+        match code {
+            SSH_MSG_DISCONNECT => return Err(Error::Other("Host sent ssh disconnect message")),
+            SSH_MSG_USERAUTH_SUCCESS => return Ok(()),
+            SSH_MSG_USERAUTH_FAILURE => {
+                // Check that password is a valid authentication method
+                let (methods, _) = SshStream::extract_name_list(&response)?;
+                if !methods.contains(&"password".to_string()) {
+                    return Err(Error::Other(
+                        "Host does not support password authentication",
+                    ));
+                }
+
+                if attempt_counter == 3 {
+                    return Err(Error::Other("Too many failed login attempts"));
+                }
+                attempt_counter += 1;
+
+                // Prompt user for password
+                print!("Password: ");
+                io::stdout()
+                    .flush()
+                    .expect("Failed to print password prompt");
+                let mut password = String::new();
+                io::stdin()
+                    .read_line(&mut password)
+                    .expect("Failed to read line");
+
+                // Send authentication request
+                let mut request = gen_userauth_header(&username);
+                SshStream::append_string(&mut request, b"password");
+                request.push(0); // false boolean field
+                SshStream::append_string(&mut request, password.trim().as_bytes());
+                stream.send(&request, Some(encrypter))?;
+            }
+            SSH_MSG_USERAUTH_BANNER => {
+                let (banner, _) = SshStream::extract_string(&response)?;
+                let banner = String::from_utf8_lossy(&banner);
+                println!("{banner}");
+            }
+            SSH_MSG_USERAUTH_PASSWD_CHANGEREQ => {
+                return Err(Error::Other(
+                    "Password expired and tssh does not support password changes",
+                ));
+            }
+            _ => (),
+        }
+    }
 }
 
 /// Generates the payload for the ssh key exchange init packet
@@ -293,6 +352,8 @@ fn negotiate_alg(client: &[&'static str], server: &Vec<String>) -> Result<&'stat
     }
 }
 
+/// Generates the header for a userauthenctication payload. Expects a method name and
+/// related fields to be appended before being sent.
 fn gen_userauth_header(username: &str) -> Vec<u8> {
     let mut header = Vec::new();
     header.push(SSH_USERAUTH_REQUEST);

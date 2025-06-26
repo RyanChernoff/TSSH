@@ -1,5 +1,5 @@
 use crate::encrypter::Encrypter;
-use crate::{Error, SSH_MSG_DISCONNECT, encrypter};
+use crate::{Error, SSH_MSG_DISCONNECT};
 use rsa::BigUint;
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -53,7 +53,7 @@ impl SshStream {
         }
 
         // Get rest of packet
-        let mut rest: Vec<u8> = vec![0; packet_length - block_size + 4];
+        let mut rest: Vec<u8> = vec![0; (packet_length + 4) - block_size];
         stream.read_exact(&mut rest)?;
 
         // Decrypt rest
