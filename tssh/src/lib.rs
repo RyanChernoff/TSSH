@@ -30,6 +30,12 @@ const SSH_MSG_USERAUTH_SUCCESS: u8 = 52;
 const SSH_MSG_USERAUTH_BANNER: u8 = 53;
 /// Indicates that a user tried to authenticate with an expired passwords and needs to change it
 const SSH_MSG_USERAUTH_PASSWD_CHANGEREQ: u8 = 60;
+/// Indicates that a general ssh request has been made
+const SSH_MSG_GLOBAL_REQUEST: u8 = 80;
+/// Indicates that a global request has been processed successfully
+const SSH_MSG_REQUEST_SUCCESS: u8 = 81;
+/// Indicates a failure to process a global request
+const SSH_MSG_REQUEST_FAILURE: u8 = 82;
 
 /// List of supported key exchange algorithms
 const KEX_ALGS: [&'static str; 1] = ["ecdh-sha2-nistp256"];
@@ -105,7 +111,14 @@ pub fn run(args: Args) -> Result<(), Error> {
     // Begin authentication stage
     authenticate(&mut stream, &mut encrypter, args.username)?;
 
-    Ok(())
+    loop {
+        let (packet_type, data) = stream.read(Some(&mut encrypter))?;
+        match packet_type {
+            SSH_MSG_DISCONNECT => return Err(Error::Other("Host sent ssh disconnect message")),
+            SSH_MSG_GLOBAL_REQUEST => process_global_request(data)?,
+            _ => eprintln!("Recieved packet of type {packet_type}"),
+        }
+    }
 }
 
 /// Exchanges version information via the SSH-2.0 version exchange protocol over the given TCP stream
@@ -305,6 +318,18 @@ fn authenticate(
             _ => (),
         }
     }
+}
+
+/// Processes an ssh global request
+fn process_global_request(data: Vec<u8>) -> Result<(), Error> {
+    let (request, data) = SshStream::extract_string(&data)?;
+    println!("Global Request: {}", String::from_utf8_lossy(&request));
+
+    if let Some(want_reply) = data.get(0) {
+        println!("Want Reply: {}", *want_reply != 0);
+    }
+
+    Ok(())
 }
 
 /// Generates the payload for the ssh key exchange init packet
