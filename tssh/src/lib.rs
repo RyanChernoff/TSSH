@@ -42,6 +42,12 @@ const SSH_MSG_CHANNEL_OPEN: u8 = 90;
 const SSH_MSG_CHANNEL_OPEN_CONFIRMATION: u8 = 91;
 /// Indicates that a channel could not be opened
 const SSH_MSG_CHANNEL_OPEN_FAILURE: u8 = 92;
+/// Indicates a request to run a program via an open channel
+const SSH_MSG_CHANNEL_REQUEST: u8 = 98;
+/// Indicates that a channel request has been processed successfully
+const SSH_MSG_CHANNEL_SUCCESS: u8 = 99;
+/// Indicates that a channel request failed to be processed
+const SSH_MSG_CHANNEL_FAILURE: u8 = 100;
 
 /// Indicates the reason for a failure to open a channel was because it was unauthorized
 const SSH_OPEN_ADMINISTRATIVELY_PROHIBITED: [u8; 4] = [0, 0, 0, 1];
@@ -121,7 +127,9 @@ pub fn run(args: Args) -> Result<(), Error> {
     authenticate(&mut stream, &mut encrypter, args.username)?;
 
     // Start a session window
-    open_window(&mut stream, &mut encrypter)?;
+    open_channel(&mut stream, &mut encrypter)?;
+
+    let mut server_channel = 0u32;
 
     loop {
         let (packet_type, data) = stream.read(Some(&mut encrypter))?;
@@ -130,8 +138,13 @@ pub fn run(args: Args) -> Result<(), Error> {
             SSH_MSG_GLOBAL_REQUEST => process_global_request(data)?,
             SSH_MSG_CHANNEL_OPEN => deny_channel_open(data, &mut stream, &mut encrypter)?,
             SSH_MSG_CHANNEL_OPEN_FAILURE => handle_channel_open_fail(data)?,
-            SSH_MSG_CHANNEL_OPEN_CONFIRMATION => confirm_channel_open(data)?,
-            _ => eprintln!("Recieved packet of type {packet_type}"),
+            SSH_MSG_CHANNEL_OPEN_CONFIRMATION => server_channel = confirm_channel_open(data)?,
+            SSH_MSG_CHANNEL_REQUEST => {
+                process_channel_request(data, server_channel, &mut stream, &mut encrypter)?
+            }
+            //SSH_MSG_CHANNEL_SUCCESS => (),
+            //SSH_MSG_CHANNEL_FAILURE => (),
+            _ => println!("Recieved packet of type {packet_type}"),
         }
     }
 }
@@ -347,7 +360,8 @@ fn process_global_request(data: Vec<u8>) -> Result<(), Error> {
     Ok(())
 }
 
-fn open_window(stream: &mut SshStream, encrypter: &mut Encrypter) -> Result<(), Error> {
+/// Opens a new channel of type session
+fn open_channel(stream: &mut SshStream, encrypter: &mut Encrypter) -> Result<(), Error> {
     let mut payload = vec![SSH_MSG_CHANNEL_OPEN];
     SshStream::append_string(&mut payload, b"session");
     payload.extend(0u32.to_be_bytes()); // session id
@@ -400,7 +414,7 @@ fn handle_channel_open_fail(data: Vec<u8>) -> Result<(), Error> {
 }
 
 /// Verifies that the confirmed channel was the one requested and proceeds with opening a shell
-fn confirm_channel_open(data: Vec<u8>) -> Result<(), Error> {
+fn confirm_channel_open(data: Vec<u8>) -> Result<u32, Error> {
     if data.len() < 16 {
         return Err(Error::Other(
             "Recieved corrupt channel open failure packet: Expected length of at least 16 bytes",
@@ -417,12 +431,39 @@ fn confirm_channel_open(data: Vec<u8>) -> Result<(), Error> {
     let window_size = u32::from_be_bytes(data[8..12].try_into()?);
     let packet_max = u32::from_be_bytes(data[12..16].try_into()?);
 
-    println!("{data:?}");
-    println!("Server window number: {server_channel}");
     println!("Server window size: {window_size}");
     println!("Server window max packet size: {packet_max}");
 
-    // Open a shell...
+    // Request a pseudo-terminal
+    let mut request = vec![SSH_MSG_CHANNEL_REQUEST];
+    request.extend(server_channel.to_be_bytes());
+    SshStream::append_string(&mut request, b"pty-req");
+    request.push(1); // want_reply = true
+    SshStream::append_string(&mut request, b"xterm-256color");
+
+    // get terminal width and height in characters and pixels
+    Ok(server_channel)
+}
+
+fn process_channel_request(
+    data: Vec<u8>,
+    server_channel: u32,
+    stream: &mut SshStream,
+    encrypter: &mut Encrypter,
+) -> Result<(), Error> {
+    let channel = u32::from_be_bytes(data[0..4].try_into()?);
+    if channel != 0 {
+        return Err(Error::Other("Recieved channel request for invalid channel"));
+    }
+
+    let (_, data) = SshStream::extract_string(&data[4..])?;
+
+    if data[0] != 0 {
+        let mut response = vec![SSH_MSG_CHANNEL_FAILURE];
+        response.extend(server_channel.to_be_bytes());
+        return stream.send(&response, Some(encrypter));
+    }
+
     Ok(())
 }
 
