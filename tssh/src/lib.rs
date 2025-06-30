@@ -36,6 +36,15 @@ const SSH_MSG_GLOBAL_REQUEST: u8 = 80;
 const SSH_MSG_REQUEST_SUCCESS: u8 = 81;
 /// Indicates a failure to process a global request
 const SSH_MSG_REQUEST_FAILURE: u8 = 82;
+/// Indicates an attempt to open a channel
+const SSH_MSG_CHANNEL_OPEN: u8 = 90;
+/// Confirms the success of an open channel request
+const SSH_MSG_CHANNEL_OPEN_CONFIRMATION: u8 = 91;
+/// Indicates that a channel could not be opened
+const SSH_MSG_CHANNEL_OPEN_FAILURE: u8 = 92;
+
+/// Indicates the reason for a failure to open a channel was because it was unauthorized
+const SSH_OPEN_ADMINISTRATIVELY_PROHIBITED: [u8; 4] = [0, 0, 0, 1];
 
 /// List of supported key exchange algorithms
 const KEX_ALGS: [&'static str; 1] = ["ecdh-sha2-nistp256"];
@@ -111,11 +120,17 @@ pub fn run(args: Args) -> Result<(), Error> {
     // Begin authentication stage
     authenticate(&mut stream, &mut encrypter, args.username)?;
 
+    // Start a session window
+    open_window(&mut stream, &mut encrypter)?;
+
     loop {
         let (packet_type, data) = stream.read(Some(&mut encrypter))?;
         match packet_type {
             SSH_MSG_DISCONNECT => return Err(Error::Other("Host sent ssh disconnect message")),
             SSH_MSG_GLOBAL_REQUEST => process_global_request(data)?,
+            SSH_MSG_CHANNEL_OPEN => deny_channel_open(data, &mut stream, &mut encrypter)?,
+            SSH_MSG_CHANNEL_OPEN_FAILURE => handle_channel_open_fail(data)?,
+            SSH_MSG_CHANNEL_OPEN_CONFIRMATION => confirm_channel_open(data)?,
             _ => eprintln!("Recieved packet of type {packet_type}"),
         }
     }
@@ -329,6 +344,85 @@ fn process_global_request(data: Vec<u8>) -> Result<(), Error> {
         println!("Want Reply: {}", *want_reply != 0);
     }
 
+    Ok(())
+}
+
+fn open_window(stream: &mut SshStream, encrypter: &mut Encrypter) -> Result<(), Error> {
+    let mut payload = vec![SSH_MSG_CHANNEL_OPEN];
+    SshStream::append_string(&mut payload, b"session");
+    payload.extend(0u32.to_be_bytes()); // session id
+    payload.extend(2097152u32.to_be_bytes()); // client window size
+    payload.extend(32768u32.to_be_bytes()); // max packet size
+
+    stream.send(&payload, Some(encrypter))
+}
+
+/// Responds to any channel open request with a fail response
+fn deny_channel_open(
+    data: Vec<u8>,
+    stream: &mut SshStream,
+    encrypter: &mut Encrypter,
+) -> Result<(), Error> {
+    let (_, data) = SshStream::extract_string(&data)?;
+    if data.len() < 4 {
+        return Err(Error::Other(
+            "Recieved corrupt channel open packet: Expected channel number",
+        ));
+    }
+
+    let mut response = vec![SSH_MSG_CHANNEL_OPEN_FAILURE];
+    response.extend(&data[0..4]);
+    response.extend(SSH_OPEN_ADMINISTRATIVELY_PROHIBITED);
+    SshStream::append_string(
+        &mut response,
+        b"Client does not permit host to open channels",
+    );
+    SshStream::append_string(&mut response, b"");
+
+    stream.send(&response, Some(encrypter))
+}
+
+/// Handles the case when a channel has failed to open and prints the error to user
+fn handle_channel_open_fail(data: Vec<u8>) -> Result<(), Error> {
+    if data.len() < 16 {
+        return Err(Error::Other(
+            "Recieved corrupt channel open failure packet: Expected length of at least 16 bytes",
+        ));
+    }
+
+    let reason_code = u32::from_be_bytes(data[4..8].try_into()?);
+    let (bytes, _) = SshStream::extract_string(&data[8..])?;
+    let description = String::from_utf8_lossy(&bytes);
+
+    eprintln!("Failed to open channel with reason code {reason_code}: {description}");
+
+    Ok(())
+}
+
+/// Verifies that the confirmed channel was the one requested and proceeds with opening a shell
+fn confirm_channel_open(data: Vec<u8>) -> Result<(), Error> {
+    if data.len() < 16 {
+        return Err(Error::Other(
+            "Recieved corrupt channel open failure packet: Expected length of at least 16 bytes",
+        ));
+    }
+    let client_channel = u32::from_be_bytes(data[0..4].try_into()?);
+    if client_channel != 0 {
+        return Err(Error::Other(
+            "Recieved confirmation for openning of unrequested channel",
+        ));
+    }
+
+    let server_channel = u32::from_be_bytes(data[4..8].try_into()?);
+    let window_size = u32::from_be_bytes(data[8..12].try_into()?);
+    let packet_max = u32::from_be_bytes(data[12..16].try_into()?);
+
+    println!("{data:?}");
+    println!("Server window number: {server_channel}");
+    println!("Server window size: {window_size}");
+    println!("Server window max packet size: {packet_max}");
+
+    // Open a shell...
     Ok(())
 }
 
