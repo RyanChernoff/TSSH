@@ -43,6 +43,8 @@ const SSH_MSG_CHANNEL_OPEN: u8 = 90;
 const SSH_MSG_CHANNEL_OPEN_CONFIRMATION: u8 = 91;
 /// Indicates that a channel could not be opened
 const SSH_MSG_CHANNEL_OPEN_FAILURE: u8 = 92;
+/// Indicates that the reciever of data can recieve more data
+const SSH_MSG_CHANNEL_WINDOW_ADJUST: u8 = 93;
 /// Indicates a request to run a program via an open channel
 const SSH_MSG_CHANNEL_REQUEST: u8 = 98;
 /// Indicates that a channel request has been processed successfully
@@ -139,6 +141,7 @@ pub fn run(args: Args) -> Result<(), Error> {
 
     let mut server_channel = 0u32;
     let mut state = WaitingFor::None;
+    let mut server_window: u64 = 0;
 
     loop {
         let (packet_type, data) = stream.read(Some(&mut encrypter))?;
@@ -146,11 +149,13 @@ pub fn run(args: Args) -> Result<(), Error> {
             SSH_MSG_DISCONNECT => return Err(Error::Other("Host sent ssh disconnect message")),
             SSH_MSG_GLOBAL_REQUEST => process_global_request(data)?,
             SSH_MSG_CHANNEL_OPEN => deny_channel_open(data, &mut stream, &mut encrypter)?,
-            SSH_MSG_CHANNEL_OPEN_FAILURE => handle_channel_open_fail(data)?,
             SSH_MSG_CHANNEL_OPEN_CONFIRMATION => {
-                server_channel = confirm_channel_open(data, &mut stream, &mut encrypter)?;
+                (server_channel, server_window) =
+                    confirm_channel_open(data, &mut stream, &mut encrypter)?;
                 state = WaitingFor::Pty;
             }
+            SSH_MSG_CHANNEL_OPEN_FAILURE => handle_channel_open_fail(data)?,
+            SSH_MSG_CHANNEL_WINDOW_ADJUST => server_window += adjust_window(data)?,
             SSH_MSG_CHANNEL_REQUEST => {
                 process_channel_request(data, server_channel, &mut stream, &mut encrypter)?
             }
@@ -416,29 +421,12 @@ fn deny_channel_open(
     stream.send(&response, Some(encrypter))
 }
 
-/// Handles the case when a channel has failed to open and prints the error to user
-fn handle_channel_open_fail(data: Vec<u8>) -> Result<(), Error> {
-    if data.len() < 16 {
-        return Err(Error::Other(
-            "Recieved corrupt channel open failure packet: Expected length of at least 16 bytes",
-        ));
-    }
-
-    let reason_code = u32::from_be_bytes(data[4..8].try_into()?);
-    let (bytes, _) = SshStream::extract_string(&data[8..])?;
-    let description = String::from_utf8_lossy(&bytes);
-
-    eprintln!("Failed to open channel with reason code {reason_code}: {description}");
-
-    Ok(())
-}
-
 /// Verifies that the confirmed channel was the one requested and proceeds with requesting a psudo terminal session
 fn confirm_channel_open(
     data: Vec<u8>,
     stream: &mut SshStream,
     encrypter: &mut Encrypter,
-) -> Result<u32, Error> {
+) -> Result<(u32, u64), Error> {
     if data.len() < 16 {
         return Err(Error::Other(
             "Recieved corrupt channel open failure packet: Expected length of at least 16 bytes",
@@ -455,7 +443,6 @@ fn confirm_channel_open(
     let window_size = u32::from_be_bytes(data[8..12].try_into()?);
     let packet_max = u32::from_be_bytes(data[12..16].try_into()?);
 
-    println!("Server window size: {window_size}");
     println!("Server window max packet size: {packet_max}");
 
     // Request a pseudo-terminal
@@ -485,7 +472,45 @@ fn confirm_channel_open(
 
     stream.send(&request, Some(encrypter))?;
 
-    Ok(server_channel)
+    Ok((server_channel, window_size as u64))
+}
+
+/// Handles the case when a channel has failed to open and prints the error to user
+fn handle_channel_open_fail(data: Vec<u8>) -> Result<(), Error> {
+    if data.len() < 16 {
+        return Err(Error::Other(
+            "Recieved corrupt channel open failure packet: Expected length of at least 16 bytes",
+        ));
+    }
+
+    let reason_code = u32::from_be_bytes(data[4..8].try_into()?);
+    let (bytes, _) = SshStream::extract_string(&data[8..])?;
+    let description = String::from_utf8_lossy(&bytes);
+
+    eprintln!("Failed to open channel with reason code {reason_code}: {description}");
+
+    Ok(())
+}
+
+/// Processes the amount to adjust a window by if the adjustment is for a valid channel
+/// and ignores the packet otherwise. If the packet is malformed (not big enough) it
+/// returns an error.
+fn adjust_window(data: Vec<u8>) -> Result<u64, Error> {
+    if data.len() < 8 {
+        return Err(Error::Other(
+            "Recieved corrupt window adjust packet: Expected length of at least 8 bytes",
+        ));
+    }
+
+    let channel = u32::from_be_bytes(data[0..4].try_into()?);
+    if channel != 0 {
+        eprintln!("Recieved window adjustment for unopened channel");
+        return Ok(0);
+    }
+
+    let amount = u32::from_be_bytes(data[4..8].try_into()?);
+    println!("{amount}");
+    Ok(amount as u64)
 }
 
 /// Handles channel specific requests
