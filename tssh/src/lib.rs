@@ -10,6 +10,7 @@ use std::array::TryFromSliceError;
 use std::fmt;
 use std::io::{self, BufRead, BufReader, Write};
 use std::net::TcpStream;
+use terminal_size::{Height, Width, terminal_size};
 
 // Packet Types
 /// Indicates a packet intends to disconnect
@@ -109,6 +110,13 @@ impl fmt::Display for Error {
     }
 }
 
+#[derive(Clone, Copy)]
+pub enum WaitingFor {
+    None,
+    Pty,
+    Shell,
+}
+
 /// Establishes a connection to a given host and procedes with SSH authentication and connection
 pub fn run(args: Args) -> Result<(), Error> {
     // Establish connection
@@ -130,6 +138,7 @@ pub fn run(args: Args) -> Result<(), Error> {
     open_channel(&mut stream, &mut encrypter)?;
 
     let mut server_channel = 0u32;
+    let mut state = WaitingFor::None;
 
     loop {
         let (packet_type, data) = stream.read(Some(&mut encrypter))?;
@@ -138,12 +147,23 @@ pub fn run(args: Args) -> Result<(), Error> {
             SSH_MSG_GLOBAL_REQUEST => process_global_request(data)?,
             SSH_MSG_CHANNEL_OPEN => deny_channel_open(data, &mut stream, &mut encrypter)?,
             SSH_MSG_CHANNEL_OPEN_FAILURE => handle_channel_open_fail(data)?,
-            SSH_MSG_CHANNEL_OPEN_CONFIRMATION => server_channel = confirm_channel_open(data)?,
+            SSH_MSG_CHANNEL_OPEN_CONFIRMATION => {
+                server_channel = confirm_channel_open(data, &mut stream, &mut encrypter)?;
+                state = WaitingFor::Pty;
+            }
             SSH_MSG_CHANNEL_REQUEST => {
                 process_channel_request(data, server_channel, &mut stream, &mut encrypter)?
             }
-            //SSH_MSG_CHANNEL_SUCCESS => (),
-            //SSH_MSG_CHANNEL_FAILURE => (),
+            SSH_MSG_CHANNEL_SUCCESS => {
+                state = handle_request_success(
+                    data,
+                    server_channel,
+                    state,
+                    &mut stream,
+                    &mut encrypter,
+                )?
+            }
+            SSH_MSG_CHANNEL_FAILURE => handle_request_fail(data, state)?,
             _ => println!("Recieved packet of type {packet_type}"),
         }
     }
@@ -413,8 +433,12 @@ fn handle_channel_open_fail(data: Vec<u8>) -> Result<(), Error> {
     Ok(())
 }
 
-/// Verifies that the confirmed channel was the one requested and proceeds with opening a shell
-fn confirm_channel_open(data: Vec<u8>) -> Result<u32, Error> {
+/// Verifies that the confirmed channel was the one requested and proceeds with requesting a psudo terminal session
+fn confirm_channel_open(
+    data: Vec<u8>,
+    stream: &mut SshStream,
+    encrypter: &mut Encrypter,
+) -> Result<u32, Error> {
     if data.len() < 16 {
         return Err(Error::Other(
             "Recieved corrupt channel open failure packet: Expected length of at least 16 bytes",
@@ -436,15 +460,35 @@ fn confirm_channel_open(data: Vec<u8>) -> Result<u32, Error> {
 
     // Request a pseudo-terminal
     let mut request = vec![SSH_MSG_CHANNEL_REQUEST];
-    request.extend(server_channel.to_be_bytes());
-    SshStream::append_string(&mut request, b"pty-req");
+    request.extend(server_channel.to_be_bytes()); // server channel num
+    SshStream::append_string(&mut request, b"pty-req"); // request pty
     request.push(1); // want_reply = true
-    SshStream::append_string(&mut request, b"xterm-256color");
+    SshStream::append_string(&mut request, b"xterm-256color"); // terminal type is xterm 
 
-    // get terminal width and height in characters and pixels
+    // Get terminal width and height in characters
+    let size = terminal_size();
+    let (width, height) = if let Some((Width(w), Height(h))) = size {
+        (w, h)
+    } else {
+        return Err(Error::Other("Could not fetch terminal information"));
+    };
+    request.extend((width as u32).to_be_bytes());
+    request.extend((height as u32).to_be_bytes());
+    request.extend([0; 8]); // ignore pixel measurement parameters
+    SshStream::append_string(
+        &mut request,
+        &[
+            1, 0, 0, 0, 3, 3, 0, 0, 0, 127, 4, 0, 0, 0, 21, 5, 0, 0, 0, 4, 9, 0, 0, 0, 19, 10, 0,
+            0, 0, 26, 35, 0, 0, 0, 1, 50, 0, 0, 0, 1, 51, 0, 0, 0, 1, 53, 0, 0, 0, 1, 0,
+        ],
+    ); // add terminal settings
+
+    stream.send(&request, Some(encrypter))?;
+
     Ok(server_channel)
 }
 
+/// Handles channel specific requests
 fn process_channel_request(
     data: Vec<u8>,
     server_channel: u32,
@@ -464,6 +508,72 @@ fn process_channel_request(
         return stream.send(&response, Some(encrypter));
     }
 
+    Ok(())
+}
+
+/// Hadles success responsed to channel requests. If the success is in response to a terminal request, it requests a shell and updates state.
+/// Ignores responses to unsent messages and unopened channels
+fn handle_request_success(
+    data: Vec<u8>,
+    server_channel: u32,
+    state: WaitingFor,
+    stream: &mut SshStream,
+    encrypter: &mut Encrypter,
+) -> Result<WaitingFor, Error> {
+    if data.len() < 4 {
+        return Err(Error::Other(
+            "Recieved corrupt channel request failure packet: Expected length of at least 4 bytes",
+        ));
+    }
+
+    let channel = u32::from_be_bytes(data[0..4].try_into()?);
+    if channel != 0 {
+        eprintln!("Recieved channel request success packet for unopened channel");
+        return Ok(state);
+    }
+
+    match state {
+        WaitingFor::Pty => {
+            let mut request = vec![SSH_MSG_CHANNEL_REQUEST];
+            request.extend(server_channel.to_be_bytes());
+            SshStream::append_string(&mut request, b"shell");
+            request.push(1); // want_reply = true
+
+            stream.send(&request, Some(encrypter))?;
+
+            return Ok(WaitingFor::Shell);
+        }
+        WaitingFor::Shell => return Ok(WaitingFor::None),
+        WaitingFor::None => {
+            eprintln!("Recieved channel request success packet for request that has not been sent");
+            return Ok(state);
+        }
+    }
+}
+
+/// Hnadles fail responses from channel requests mainly opening a terminal
+fn handle_request_fail(data: Vec<u8>, state: WaitingFor) -> Result<(), Error> {
+    if data.len() < 4 {
+        return Err(Error::Other(
+            "Recieved corrupt channel request failure packet: Expected length of at least 4 bytes",
+        ));
+    }
+
+    let channel = u32::from_be_bytes(data[0..4].try_into()?);
+    if channel == 0 {
+        match state {
+            WaitingFor::Pty => return Err(Error::Other("Failed to open remote terminal")),
+            WaitingFor::Shell => return Err(Error::Other("Failed to open a remote shell")),
+            WaitingFor::None => {
+                eprintln!(
+                    "Recieved channel request failure packet for request that has not been sent"
+                );
+                return Ok(());
+            }
+        }
+    }
+
+    eprintln!("Recieved channel request failure packet for unopened channel");
     Ok(())
 }
 
