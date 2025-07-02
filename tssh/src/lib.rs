@@ -1,7 +1,7 @@
 mod encrypter;
 mod ssh_stream;
 
-use encrypter::Encrypter;
+use encrypter::{Decrypter, Encrypter, generate};
 use rand::Rng;
 use rand_core::OsRng;
 use rpassword;
@@ -132,10 +132,10 @@ pub fn run(args: Args) -> Result<(), Error> {
     let mut stream = SshStream::new(stream);
 
     // Exchange key information
-    let mut encrypter = exchange_keys(&mut stream, hash_prefix.clone())?;
+    let (mut encrypter, mut decrypter) = exchange_keys(&mut stream, hash_prefix.clone())?;
 
     // Begin authentication stage
-    authenticate(&mut stream, &mut encrypter, args.username)?;
+    authenticate(&mut stream, &mut encrypter, &mut decrypter, args.username)?;
 
     // Start a session window
     let client_window: Arc<Mutex<u64>> =
@@ -147,7 +147,7 @@ pub fn run(args: Args) -> Result<(), Error> {
     let server_window: Arc<Mutex<u64>> = Arc::new(Mutex::new(0));
 
     loop {
-        let (packet_type, data) = stream.read(Some(&mut encrypter))?;
+        let (packet_type, data) = stream.read(Some(&mut decrypter))?;
         match packet_type {
             SSH_MSG_DISCONNECT => return Err(Error::Other("Host sent ssh disconnect message")),
             SSH_MSG_GLOBAL_REQUEST => process_global_request(data)?,
@@ -237,7 +237,10 @@ fn exchange_versions(stream: &mut TcpStream) -> Result<Vec<u8>, Error> {
 }
 
 /// Runs the secret key exchange portion of the SSH transport layer
-fn exchange_keys(stream: &mut SshStream, mut hash_prefix: Vec<u8>) -> Result<Encrypter, Error> {
+fn exchange_keys(
+    stream: &mut SshStream,
+    mut hash_prefix: Vec<u8>,
+) -> Result<(Encrypter, Decrypter), Error> {
     // Generate kexinit payload and add it to exchange hash prefix
     let payload = gen_kexinit_payload();
     SshStream::append_string(&mut hash_prefix, &payload);
@@ -246,7 +249,7 @@ fn exchange_keys(stream: &mut SshStream, mut hash_prefix: Vec<u8>) -> Result<Enc
     stream.send(&payload, None)?;
 
     // Wait until recieved key exchange packet each packet
-    let (mut packet, num_read) = stream.read_until_no_encrypter(SSH_MSG_KEXINIT)?;
+    let (mut packet, num_read) = stream.read_until_no_decrypter(SSH_MSG_KEXINIT)?;
 
     // Ensure packet can be a key exchange packet
     if packet.len() < 61 {
@@ -294,25 +297,26 @@ fn exchange_keys(stream: &mut SshStream, mut hash_prefix: Vec<u8>) -> Result<Enc
     let decrypt_alg = negotiate_alg(&ENCRYPT_ALGS, &encrypt_algs_stc)?;
 
     let mac_alg_send = negotiate_alg(&MAC_ALGS, &mac_algs_cts)?;
-    let mac_alg_recieve = negotiate_alg(&MAC_ALGS, &mac_algs_stc)?;
+    let verify_alg = negotiate_alg(&MAC_ALGS, &mac_algs_stc)?;
 
     let compress_alg = negotiate_alg(&COMPRESS_ALGS, &compress_algs_cts)?;
     let decompress_alg = negotiate_alg(&COMPRESS_ALGS, &compress_algs_stc)?;
 
     // Normally you check for incorrect kex guesses here but the only implemented algorithm requires client to move first
 
-    Encrypter::new(
+    generate(
         stream,
         key_exchange_alg,
         host_key_alg,
         encrypt_alg,
         decrypt_alg,
         mac_alg_send,
-        mac_alg_recieve,
+        verify_alg,
         compress_alg,
         decompress_alg,
         hash_prefix,
         num_read,
+        None,
         None,
     )
 }
@@ -320,11 +324,12 @@ fn exchange_keys(stream: &mut SshStream, mut hash_prefix: Vec<u8>) -> Result<Enc
 fn authenticate(
     stream: &mut SshStream,
     encrypter: &mut Encrypter,
+    decrypter: &mut Decrypter,
     username: String,
 ) -> Result<(), Error> {
     // Request user authentication
     stream.send(b"\x05\x00\x00\x00\x0cssh-userauth", Some(encrypter))?;
-    let payload = stream.read_until(SSH_MSG_SERVICE_ACCEPT, encrypter)?;
+    let payload = stream.read_until(SSH_MSG_SERVICE_ACCEPT, decrypter)?;
     let (service, _) = SshStream::extract_string(&payload)?;
     if service != b"ssh-userauth" {
         return Err(Error::Other(
@@ -340,7 +345,7 @@ fn authenticate(
     // Get response from host
     let mut attempt_counter: u8 = 0;
     loop {
-        let (code, response) = stream.read(Some(encrypter))?;
+        let (code, response) = stream.read(Some(decrypter))?;
         match code {
             SSH_MSG_DISCONNECT => return Err(Error::Other("Host sent ssh disconnect message")),
             SSH_MSG_USERAUTH_SUCCESS => return Ok(()),

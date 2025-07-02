@@ -1,4 +1,4 @@
-use crate::encrypter::Encrypter;
+use crate::encrypter::{Decrypter, Encrypter};
 use crate::{Error, SSH_MSG_DISCONNECT};
 use rsa::BigUint;
 use std::io::{Read, Write};
@@ -29,20 +29,20 @@ impl SshStream {
     /// Requires that the packet (not just the buffer that contains it) meet
     /// the minimum length requirement of 16 bytes and the maximum length requirement
     /// of 35000 bytes.
-    pub fn read(&mut self, mut encrypter: Option<&mut Encrypter>) -> Result<(u8, Vec<u8>), Error> {
+    pub fn read(&mut self, mut decrypter: Option<&mut Decrypter>) -> Result<(u8, Vec<u8>), Error> {
         let SshStream(stream) = self;
 
         // Get the first block of the packet
-        let block_size = match &encrypter {
-            Some(enc) => enc.decrypt_block_size() as usize,
+        let block_size = match &decrypter {
+            Some(dec) => dec.block_size() as usize,
             None => 8,
         };
         let mut packet: Vec<u8> = vec![0; block_size];
         stream.read_exact(&mut packet)?;
 
         // Decrypt first block of packet
-        let mut packet = match &mut encrypter {
-            Some(enc) => enc.decrypt(packet)?,
+        let mut packet = match &mut decrypter {
+            Some(dec) => dec.decrypt(packet)?,
             None => packet,
         };
 
@@ -69,8 +69,8 @@ impl SshStream {
         stream.read_exact(&mut rest)?;
 
         // Decrypt rest
-        let rest = match &mut encrypter {
-            Some(enc) => enc.decrypt(rest)?,
+        let rest = match &mut decrypter {
+            Some(dec) => dec.decrypt(rest)?,
             None => rest,
         };
         packet.extend(rest);
@@ -88,13 +88,13 @@ impl SshStream {
             ));
         }
 
-        if let Some(enc) = &mut encrypter {
+        if let Some(dec) = &mut decrypter {
             // Get mac
-            let mut mac: Vec<u8> = vec![0; enc.verify_length()];
+            let mut mac: Vec<u8> = vec![0; dec.verify_length()];
             stream.read_exact(&mut mac)?;
 
             // Verify packet
-            if !enc.verify(&packet, &mac) {
+            if !dec.verify(&packet, &mac) {
                 return Err(Error::Other(
                     "Invalid mac on recieved packet: Packet Corrupted",
                 ));
@@ -103,8 +103,8 @@ impl SshStream {
 
         let payload_length = (packet_length - padding_length - 2) as usize;
         let payload = &packet[5..(6 + payload_length)];
-        let mut payload = match encrypter {
-            Some(enc) => enc.decompress(payload),
+        let mut payload = match decrypter {
+            Some(dec) => dec.decompress(payload),
             None => payload.to_vec(),
         };
 
@@ -125,7 +125,7 @@ impl SshStream {
 
         // Calculate block size
         let block_size = match &encrypter {
-            Some(enc) => enc.encrypt_block_size(),
+            Some(enc) => enc.block_size(),
             None => 8,
         };
 
@@ -173,7 +173,7 @@ impl SshStream {
     /// Continuously reads SSH packets until it finds one with an ssh code that matches
     /// the wait type. If it runs into an SSH_MSG_DISCONNECT packet it returns with an error.
     /// Returns the number of messages read as this needs to be tracked
-    pub fn read_until_no_encrypter(&mut self, wait_type: u8) -> Result<(Vec<u8>, u32), Error> {
+    pub fn read_until_no_decrypter(&mut self, wait_type: u8) -> Result<(Vec<u8>, u32), Error> {
         let mut num_read = 0;
         loop {
             // Read next packet
@@ -197,11 +197,11 @@ impl SshStream {
     pub fn read_until(
         &mut self,
         wait_type: u8,
-        encrypter: &mut Encrypter,
+        decrypter: &mut Decrypter,
     ) -> Result<Vec<u8>, Error> {
         loop {
             // Read next packet
-            let (packet_type, packet) = self.read(Some(encrypter))?;
+            let (packet_type, packet) = self.read(Some(decrypter))?;
 
             // Check if recieved desired packet
             if packet_type == wait_type {
