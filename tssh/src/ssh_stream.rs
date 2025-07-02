@@ -13,6 +13,18 @@ impl SshStream {
         SshStream(stream)
     }
 
+    /// Creates a clone of an ssh stream
+    pub fn try_clone(&self) -> Result<Self, Error> {
+        let SshStream(stream) = self;
+
+        let clone = stream.try_clone();
+
+        match clone {
+            Ok(clone_stream) => Ok(SshStream(clone_stream)),
+            Err(_) => Err(Error::Other("Failed to clone SSH stream")),
+        }
+    }
+
     /// Returns the payload of the next ssh packet.
     /// Requires that the packet (not just the buffer that contains it) meet
     /// the minimum length requirement of 16 bytes and the maximum length requirement

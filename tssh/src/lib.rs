@@ -10,6 +10,7 @@ use std::array::TryFromSliceError;
 use std::fmt;
 use std::io::{self, BufRead, BufReader, Write};
 use std::net::TcpStream;
+use std::sync::{Arc, Mutex};
 use terminal_size::{Height, Width, terminal_size};
 
 // Packet Types
@@ -137,11 +138,13 @@ pub fn run(args: Args) -> Result<(), Error> {
     authenticate(&mut stream, &mut encrypter, args.username)?;
 
     // Start a session window
-    open_channel(&mut stream, &mut encrypter)?;
+    let client_window: Arc<Mutex<u64>> =
+        Arc::new(Mutex::new(open_channel(&mut stream, &mut encrypter)?));
 
-    let mut server_channel = 0u32;
-    let mut state = WaitingFor::None;
-    let mut server_window: u64 = 0;
+    let mut server_channel: u32 = 0u32;
+    let mut server_packet_max: u32 = 0;
+    let mut state: WaitingFor = WaitingFor::None;
+    let server_window: Arc<Mutex<u64>> = Arc::new(Mutex::new(0));
 
     loop {
         let (packet_type, data) = stream.read(Some(&mut encrypter))?;
@@ -150,12 +153,20 @@ pub fn run(args: Args) -> Result<(), Error> {
             SSH_MSG_GLOBAL_REQUEST => process_global_request(data)?,
             SSH_MSG_CHANNEL_OPEN => deny_channel_open(data, &mut stream, &mut encrypter)?,
             SSH_MSG_CHANNEL_OPEN_CONFIRMATION => {
-                (server_channel, server_window) =
+                let (channel, window, packet_max) =
                     confirm_channel_open(data, &mut stream, &mut encrypter)?;
+                server_channel = channel;
+                server_packet_max = packet_max;
                 state = WaitingFor::Pty;
+                let mut size = server_window.lock().unwrap();
+                *size = window;
             }
             SSH_MSG_CHANNEL_OPEN_FAILURE => handle_channel_open_fail(data)?,
-            SSH_MSG_CHANNEL_WINDOW_ADJUST => server_window += adjust_window(data)?,
+            SSH_MSG_CHANNEL_WINDOW_ADJUST => {
+                let add_amount = adjust_window(data)?;
+                let mut size = server_window.lock().unwrap();
+                *size += add_amount;
+            }
             SSH_MSG_CHANNEL_REQUEST => {
                 process_channel_request(data, server_channel, &mut stream, &mut encrypter)?
             }
@@ -379,21 +390,23 @@ fn process_global_request(data: Vec<u8>) -> Result<(), Error> {
     println!("Global Request: {}", String::from_utf8_lossy(&request));
 
     if let Some(want_reply) = data.get(0) {
-        println!("Want Reply: {}", *want_reply != 0);
+        println!("Want Reply: {}\n", *want_reply != 0);
     }
 
     Ok(())
 }
 
 /// Opens a new channel of type session
-fn open_channel(stream: &mut SshStream, encrypter: &mut Encrypter) -> Result<(), Error> {
+fn open_channel(stream: &mut SshStream, encrypter: &mut Encrypter) -> Result<u64, Error> {
     let mut payload = vec![SSH_MSG_CHANNEL_OPEN];
     SshStream::append_string(&mut payload, b"session");
     payload.extend(0u32.to_be_bytes()); // session id
     payload.extend(2097152u32.to_be_bytes()); // client window size
     payload.extend(32768u32.to_be_bytes()); // max packet size
 
-    stream.send(&payload, Some(encrypter))
+    stream.send(&payload, Some(encrypter))?;
+
+    Ok(2097152u64)
 }
 
 /// Responds to any channel open request with a fail response
@@ -426,7 +439,7 @@ fn confirm_channel_open(
     data: Vec<u8>,
     stream: &mut SshStream,
     encrypter: &mut Encrypter,
-) -> Result<(u32, u64), Error> {
+) -> Result<(u32, u64, u32), Error> {
     if data.len() < 16 {
         return Err(Error::Other(
             "Recieved corrupt channel open failure packet: Expected length of at least 16 bytes",
@@ -442,8 +455,6 @@ fn confirm_channel_open(
     let server_channel = u32::from_be_bytes(data[4..8].try_into()?);
     let window_size = u32::from_be_bytes(data[8..12].try_into()?);
     let packet_max = u32::from_be_bytes(data[12..16].try_into()?);
-
-    println!("Server window max packet size: {packet_max}");
 
     // Request a pseudo-terminal
     let mut request = vec![SSH_MSG_CHANNEL_REQUEST];
@@ -472,7 +483,7 @@ fn confirm_channel_open(
 
     stream.send(&request, Some(encrypter))?;
 
-    Ok((server_channel, window_size as u64))
+    Ok((server_channel, window_size as u64, packet_max))
 }
 
 /// Handles the case when a channel has failed to open and prints the error to user
@@ -509,7 +520,6 @@ fn adjust_window(data: Vec<u8>) -> Result<u64, Error> {
     }
 
     let amount = u32::from_be_bytes(data[4..8].try_into()?);
-    println!("{amount}");
     Ok(amount as u64)
 }
 
