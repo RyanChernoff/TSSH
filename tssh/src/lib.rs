@@ -1,6 +1,8 @@
 mod encrypter;
 mod ssh_stream;
+mod writer;
 
+use crossterm::terminal::size;
 use encrypter::{Decrypter, Encrypter, generate};
 use rand::Rng;
 use rand_core::OsRng;
@@ -10,8 +12,9 @@ use std::array::TryFromSliceError;
 use std::fmt;
 use std::io::{self, BufRead, BufReader, Write};
 use std::net::TcpStream;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
-use terminal_size::{Height, Width, terminal_size};
+use writer::spawn;
 
 // Packet Types
 /// Indicates a packet intends to disconnect
@@ -152,6 +155,7 @@ pub fn run(args: Args) -> Result<(), Error> {
     let mut server_packet_max: u32 = 0;
     let remote_window: Arc<Mutex<u64>> = Arc::new(Mutex::new(0));
     let encrypter = Arc::new(Mutex::new(encrypter));
+    let stop_flag = Arc::new(AtomicBool::new(false));
 
     loop {
         let (packet_type, data) = stream.read(Some(&mut decrypter))?;
@@ -196,11 +200,22 @@ pub fn run(args: Args) -> Result<(), Error> {
                 process_channel_request(data, server_channel, &mut stream, &encrypter)?
             }
             SSH_MSG_CHANNEL_SUCCESS => {
-                state =
-                    handle_request_success(data, server_channel, state, &mut stream, &encrypter)?
+                state = handle_request_success(
+                    data,
+                    server_channel,
+                    state,
+                    &mut stream,
+                    &encrypter,
+                    &remote_window,
+                    server_packet_max,
+                    &stop_flag,
+                )?
             }
             SSH_MSG_CHANNEL_FAILURE => handle_request_fail(data, state)?,
-            _ => println!("Recieved packet of type {packet_type}"),
+            _ => {
+                write!(io::stdout(), "Recieved packet of type {packet_type}\n")?;
+                io::stdout().flush()?;
+            }
         }
     }
 }
@@ -412,12 +427,17 @@ fn authenticate(
 /// Processes an ssh global request
 fn process_global_request(data: Vec<u8>) -> Result<(), Error> {
     let (request, data) = SshStream::extract_string(&data)?;
-    println!("Global Request: {}", String::from_utf8_lossy(&request));
+    write!(
+        io::stdout(),
+        "Global Request: {}\n",
+        String::from_utf8_lossy(&request)
+    )?;
 
     if let Some(want_reply) = data.get(0) {
-        println!("Want Reply: {}\n", *want_reply != 0);
+        write!(io::stdout(), "Want Reply: {}\n", *want_reply != 0)?;
     }
 
+    io::stdout().flush()?;
     Ok(())
 }
 
@@ -490,12 +510,7 @@ fn confirm_channel_open(
     SshStream::append_string(&mut request, b"xterm-256color"); // terminal type is xterm 
 
     // Get terminal width and height in characters
-    let size = terminal_size();
-    let (width, height) = if let Some((Width(w), Height(h))) = size {
-        (w, h)
-    } else {
-        return Err(Error::Other("Could not fetch terminal information"));
-    };
+    let (width, height) = size()?;
     request.extend((width as u32).to_be_bytes());
     request.extend((height as u32).to_be_bytes());
     request.extend([0; 8]); // ignore pixel measurement parameters
@@ -542,7 +557,11 @@ fn adjust_window(data: Vec<u8>) -> Result<u64, Error> {
 
     let channel = u32::from_be_bytes(data[0..4].try_into()?);
     if channel != 0 {
-        eprintln!("Recieved window adjustment for unopened channel");
+        write!(
+            io::stderr(),
+            "Recieved window adjustment for unopened channel\n"
+        )?;
+        io::stderr().flush()?;
         return Ok(0);
     }
 
@@ -565,12 +584,16 @@ fn process_channel_data(
 
     let channel = u32::from_be_bytes(data[0..4].try_into()?);
     if channel != 0 {
-        eprintln!("Recieved channel data packet for unopened channel");
+        write!(
+            io::stderr(),
+            "Recieved channel data packet for unopened channel\n"
+        )?;
+        io::stderr().flush()?;
         return Ok(window_size);
     }
 
     let (data, _) = SshStream::extract_string(&data[4..])?;
-    print!("{}", String::from_utf8_lossy(&data));
+    write!(io::stdout(), "{}", String::from_utf8_lossy(&data))?;
     io::stdout().flush()?;
 
     // update window
@@ -604,7 +627,11 @@ fn process_extended_channel_data(
 
     let channel = u32::from_be_bytes(data[0..4].try_into()?);
     if channel != 0 {
-        eprintln!("Recieved extended channel data packet for unopened channel");
+        write!(
+            io::stderr(),
+            "Recieved extended channel data packet for unopened channel\n"
+        )?;
+        io::stderr().flush()?;
         return Ok(window_size);
     }
 
@@ -613,11 +640,12 @@ fn process_extended_channel_data(
 
     // If data type is stderr then print to stderr
     if data_type == 1 {
-        eprint!("{}", String::from_utf8_lossy(&data));
+        write!(io::stderr(), "{}", String::from_utf8_lossy(&data))?;
+        io::stderr().flush()?;
     } else {
-        print!("{}", String::from_utf8_lossy(&data));
+        write!(io::stdout(), "{}", String::from_utf8_lossy(&data))?;
+        io::stdout().flush()?;
     }
-    io::stdout().flush()?;
 
     // update window
     let len = data.len() as u64;
@@ -668,6 +696,9 @@ fn handle_request_success(
     state: WaitingFor,
     stream: &mut SshStream,
     encrypter: &Arc<Mutex<Encrypter>>,
+    remote_window: &Arc<Mutex<u64>>,
+    server_packet_max: u32,
+    stop_flag: &Arc<AtomicBool>,
 ) -> Result<WaitingFor, Error> {
     if data.len() < 4 {
         return Err(Error::Other(
@@ -677,7 +708,11 @@ fn handle_request_success(
 
     let channel = u32::from_be_bytes(data[0..4].try_into()?);
     if channel != 0 {
-        eprintln!("Recieved channel request success packet for unopened channel");
+        write!(
+            io::stderr(),
+            "Recieved channel request success packet for unopened channel\n"
+        )?;
+        io::stderr().flush()?;
         return Ok(state);
     }
 
@@ -693,9 +728,22 @@ fn handle_request_success(
 
             return Ok(WaitingFor::Shell);
         }
-        WaitingFor::Shell => return Ok(WaitingFor::None),
+        WaitingFor::Shell => {
+            spawn(
+                stream.try_clone()?,
+                encrypter.clone(),
+                remote_window.clone(),
+                server_packet_max,
+                stop_flag.clone(),
+            );
+            return Ok(WaitingFor::None);
+        }
         WaitingFor::None => {
-            eprintln!("Recieved channel request success packet for request that has not been sent");
+            write!(
+                io::stderr(),
+                "Recieved channel request success packet for request that has not been sent\n"
+            )?;
+            io::stderr().flush()?;
             return Ok(state);
         }
     }
@@ -715,15 +763,21 @@ fn handle_request_fail(data: Vec<u8>, state: WaitingFor) -> Result<(), Error> {
             WaitingFor::Pty => return Err(Error::Other("Failed to open remote terminal")),
             WaitingFor::Shell => return Err(Error::Other("Failed to open a remote shell")),
             WaitingFor::None => {
-                eprintln!(
-                    "Recieved channel request failure packet for request that has not been sent"
-                );
+                write!(
+                    io::stderr(),
+                    "Recieved channel request failure packet for request that has not been sent\n"
+                )?;
+                io::stderr().flush()?;
                 return Ok(());
             }
         }
     }
 
-    eprintln!("Recieved channel request failure packet for unopened channel");
+    write!(
+        io::stderr(),
+        "Recieved channel request failure packet for unopened channel\n"
+    )?;
+    io::stderr().flush()?;
     Ok(())
 }
 
