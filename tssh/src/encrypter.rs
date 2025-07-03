@@ -63,8 +63,6 @@ pub struct Decrypter {
     verify_key: Vec<u8>,
     /// Number of packets recieved (after initial key exchange)
     pub packet_num: u32,
-    /// Unique identifier for the ssh session
-    session_id: Vec<u8>,
 }
 
 /// Enum representing all supported encryption algorithm types
@@ -276,7 +274,6 @@ pub fn generate(
             key: decrypt_key,
             verify_key,
             packet_num: packet_num_recieve,
-            session_id,
         },
     ))
 }

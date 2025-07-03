@@ -46,6 +46,11 @@ const SSH_MSG_CHANNEL_OPEN_CONFIRMATION: u8 = 91;
 const SSH_MSG_CHANNEL_OPEN_FAILURE: u8 = 92;
 /// Indicates that the reciever of data can recieve more data
 const SSH_MSG_CHANNEL_WINDOW_ADJUST: u8 = 93;
+/// Indicates data meant to be processed by a channel
+const SSH_MSG_CHANNEL_DATA: u8 = 94;
+/// Indicates data meant to be processed by a channel that is seperate
+/// from the normal stram (usually stderr)
+const SSH_MSG_CHANNEL_EXTENDED_DATA: u8 = 95;
 /// Indicates a request to run a program via an open channel
 const SSH_MSG_CHANNEL_REQUEST: u8 = 98;
 /// Indicates that a channel request has been processed successfully
@@ -138,14 +143,14 @@ pub fn run(args: Args) -> Result<(), Error> {
     authenticate(&mut stream, &mut encrypter, &mut decrypter, args.username)?;
 
     // Start a session window
-    let mut client_window = open_channel(&mut stream, &mut encrypter)?;
+    let mut local_window = open_channel(&mut stream, &mut encrypter)?;
 
     let mut server_channel: u32 = 0u32;
-    let mut server_packet_max: u32 = 0;
     let mut state: WaitingFor = WaitingFor::None;
 
     // Shared state with reading and writing thread
-    let server_window: Arc<Mutex<u64>> = Arc::new(Mutex::new(0));
+    let mut server_packet_max: u32 = 0;
+    let remote_window: Arc<Mutex<u64>> = Arc::new(Mutex::new(0));
     let encrypter = Arc::new(Mutex::new(encrypter));
 
     loop {
@@ -160,14 +165,32 @@ pub fn run(args: Args) -> Result<(), Error> {
                 server_channel = channel;
                 server_packet_max = packet_max;
                 state = WaitingFor::Pty;
-                let mut size = server_window.lock().unwrap();
+                let mut size = remote_window.lock().unwrap();
                 *size = window;
             }
             SSH_MSG_CHANNEL_OPEN_FAILURE => handle_channel_open_fail(data)?,
             SSH_MSG_CHANNEL_WINDOW_ADJUST => {
                 let add_amount = adjust_window(data)?;
-                let mut size = server_window.lock().unwrap();
+                let mut size = remote_window.lock().unwrap();
                 *size += add_amount;
+            }
+            SSH_MSG_CHANNEL_DATA => {
+                local_window = process_channel_data(
+                    data,
+                    &mut stream,
+                    &encrypter,
+                    server_channel,
+                    local_window,
+                )?
+            }
+            SSH_MSG_CHANNEL_EXTENDED_DATA => {
+                local_window = process_extended_channel_data(
+                    data,
+                    &mut stream,
+                    &encrypter,
+                    server_channel,
+                    local_window,
+                )?
             }
             SSH_MSG_CHANNEL_REQUEST => {
                 process_channel_request(data, server_channel, &mut stream, &encrypter)?
@@ -525,6 +548,91 @@ fn adjust_window(data: Vec<u8>) -> Result<u64, Error> {
 
     let amount = u32::from_be_bytes(data[4..8].try_into()?);
     Ok(amount as u64)
+}
+
+fn process_channel_data(
+    data: Vec<u8>,
+    stream: &mut SshStream,
+    encrypter: &Arc<Mutex<Encrypter>>,
+    server_channel: u32,
+    window_size: u64,
+) -> Result<u64, Error> {
+    if data.len() < 8 {
+        return Err(Error::Other(
+            "Recieved corrupt channel data packet: Expected length of at least 8 bytes",
+        ));
+    }
+
+    let channel = u32::from_be_bytes(data[0..4].try_into()?);
+    if channel != 0 {
+        eprintln!("Recieved channel data packet for unopened channel");
+        return Ok(window_size);
+    }
+
+    let (data, _) = SshStream::extract_string(&data[4..])?;
+    print!("{}", String::from_utf8_lossy(&data));
+    io::stdout().flush()?;
+
+    // update window
+    let len = data.len() as u64;
+    // If window is too small after processing data adjust window size
+    if len > window_size || window_size - len < 100 {
+        let mut request = vec![SSH_MSG_CHANNEL_WINDOW_ADJUST];
+        request.extend(server_channel.to_be_bytes());
+        request.extend(2097152u32.to_be_bytes());
+
+        let mut encrypter = encrypter.lock().unwrap();
+        stream.send(&request, Some(&mut encrypter))?;
+        return Ok(window_size + 2097152u64 - len);
+    }
+
+    Ok(window_size - len)
+}
+
+fn process_extended_channel_data(
+    data: Vec<u8>,
+    stream: &mut SshStream,
+    encrypter: &Arc<Mutex<Encrypter>>,
+    server_channel: u32,
+    window_size: u64,
+) -> Result<u64, Error> {
+    if data.len() < 12 {
+        return Err(Error::Other(
+            "Recieved corrupt extended channel data packet: Expected length of at least 12 bytes",
+        ));
+    }
+
+    let channel = u32::from_be_bytes(data[0..4].try_into()?);
+    if channel != 0 {
+        eprintln!("Recieved extended channel data packet for unopened channel");
+        return Ok(window_size);
+    }
+
+    let data_type = u32::from_be_bytes(data[4..8].try_into()?);
+    let (data, _) = SshStream::extract_string(&data[8..])?;
+
+    // If data type is stderr then print to stderr
+    if data_type == 1 {
+        eprint!("{}", String::from_utf8_lossy(&data));
+    } else {
+        print!("{}", String::from_utf8_lossy(&data));
+    }
+    io::stdout().flush()?;
+
+    // update window
+    let len = data.len() as u64;
+    // If window is too small after processing data adjust window size
+    if len > window_size || window_size - len < 100 {
+        let mut request = vec![SSH_MSG_CHANNEL_WINDOW_ADJUST];
+        request.extend(server_channel.to_be_bytes());
+        request.extend(2097152u32.to_be_bytes());
+
+        let mut encrypter = encrypter.lock().unwrap();
+        stream.send(&request, Some(&mut encrypter))?;
+        return Ok(window_size + 2097152u64 - len);
+    }
+
+    Ok(window_size - len)
 }
 
 /// Handles channel specific requests
