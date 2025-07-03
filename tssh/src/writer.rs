@@ -51,6 +51,16 @@ pub fn spawn(
                             KeyCode::Tab => output = String::from('\t'),
                             KeyCode::Backspace => output = "\x08 \x08".to_string(),
                             KeyCode::Esc => output = "\x1B".to_string(),
+                            KeyCode::Left => output = "\x1B[D".to_string(),
+                            KeyCode::Right => output = "\x1B[C".to_string(),
+                            KeyCode::Up => output = "\x1B[A".to_string(),
+                            KeyCode::Down => output = "\x1B[B".to_string(),
+                            KeyCode::Insert => output = "\x1B[2~".to_string(),
+                            KeyCode::Delete => output = "\x1B[3~".to_string(),
+                            KeyCode::Home => output = "\x1B[H".to_string(),
+                            KeyCode::End => output = "\x1B[F".to_string(),
+                            KeyCode::PageUp => output = "\x1B[5~".to_string(),
+                            KeyCode::PageDown => output = "\x1B[6~".to_string(),
                             _ => (),
                         }
 
