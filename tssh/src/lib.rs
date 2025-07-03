@@ -138,23 +138,25 @@ pub fn run(args: Args) -> Result<(), Error> {
     authenticate(&mut stream, &mut encrypter, &mut decrypter, args.username)?;
 
     // Start a session window
-    let client_window: Arc<Mutex<u64>> =
-        Arc::new(Mutex::new(open_channel(&mut stream, &mut encrypter)?));
+    let mut client_window = open_channel(&mut stream, &mut encrypter)?;
 
     let mut server_channel: u32 = 0u32;
     let mut server_packet_max: u32 = 0;
     let mut state: WaitingFor = WaitingFor::None;
+
+    // Shared state with reading and writing thread
     let server_window: Arc<Mutex<u64>> = Arc::new(Mutex::new(0));
+    let encrypter = Arc::new(Mutex::new(encrypter));
 
     loop {
         let (packet_type, data) = stream.read(Some(&mut decrypter))?;
         match packet_type {
             SSH_MSG_DISCONNECT => return Err(Error::Other("Host sent ssh disconnect message")),
             SSH_MSG_GLOBAL_REQUEST => process_global_request(data)?,
-            SSH_MSG_CHANNEL_OPEN => deny_channel_open(data, &mut stream, &mut encrypter)?,
+            SSH_MSG_CHANNEL_OPEN => deny_channel_open(data, &mut stream, &encrypter)?,
             SSH_MSG_CHANNEL_OPEN_CONFIRMATION => {
                 let (channel, window, packet_max) =
-                    confirm_channel_open(data, &mut stream, &mut encrypter)?;
+                    confirm_channel_open(data, &mut stream, &encrypter)?;
                 server_channel = channel;
                 server_packet_max = packet_max;
                 state = WaitingFor::Pty;
@@ -168,16 +170,11 @@ pub fn run(args: Args) -> Result<(), Error> {
                 *size += add_amount;
             }
             SSH_MSG_CHANNEL_REQUEST => {
-                process_channel_request(data, server_channel, &mut stream, &mut encrypter)?
+                process_channel_request(data, server_channel, &mut stream, &encrypter)?
             }
             SSH_MSG_CHANNEL_SUCCESS => {
-                state = handle_request_success(
-                    data,
-                    server_channel,
-                    state,
-                    &mut stream,
-                    &mut encrypter,
-                )?
+                state =
+                    handle_request_success(data, server_channel, state, &mut stream, &encrypter)?
             }
             SSH_MSG_CHANNEL_FAILURE => handle_request_fail(data, state)?,
             _ => println!("Recieved packet of type {packet_type}"),
@@ -418,7 +415,7 @@ fn open_channel(stream: &mut SshStream, encrypter: &mut Encrypter) -> Result<u64
 fn deny_channel_open(
     data: Vec<u8>,
     stream: &mut SshStream,
-    encrypter: &mut Encrypter,
+    encrypter: &Arc<Mutex<Encrypter>>,
 ) -> Result<(), Error> {
     let (_, data) = SshStream::extract_string(&data)?;
     if data.len() < 4 {
@@ -436,14 +433,15 @@ fn deny_channel_open(
     );
     SshStream::append_string(&mut response, b"");
 
-    stream.send(&response, Some(encrypter))
+    let mut encrypter = encrypter.lock().unwrap();
+    stream.send(&response, Some(&mut encrypter))
 }
 
 /// Verifies that the confirmed channel was the one requested and proceeds with requesting a psudo terminal session
 fn confirm_channel_open(
     data: Vec<u8>,
     stream: &mut SshStream,
-    encrypter: &mut Encrypter,
+    encrypter: &Arc<Mutex<Encrypter>>,
 ) -> Result<(u32, u64, u32), Error> {
     if data.len() < 16 {
         return Err(Error::Other(
@@ -486,7 +484,8 @@ fn confirm_channel_open(
         ],
     ); // add terminal settings
 
-    stream.send(&request, Some(encrypter))?;
+    let mut encrypter = encrypter.lock().unwrap();
+    stream.send(&request, Some(&mut encrypter))?;
 
     Ok((server_channel, window_size as u64, packet_max))
 }
@@ -533,7 +532,7 @@ fn process_channel_request(
     data: Vec<u8>,
     server_channel: u32,
     stream: &mut SshStream,
-    encrypter: &mut Encrypter,
+    encrypter: &Arc<Mutex<Encrypter>>,
 ) -> Result<(), Error> {
     let channel = u32::from_be_bytes(data[0..4].try_into()?);
     if channel != 0 {
@@ -545,7 +544,9 @@ fn process_channel_request(
     if data[0] != 0 {
         let mut response = vec![SSH_MSG_CHANNEL_FAILURE];
         response.extend(server_channel.to_be_bytes());
-        return stream.send(&response, Some(encrypter));
+
+        let mut encrypter = encrypter.lock().unwrap();
+        return stream.send(&response, Some(&mut encrypter));
     }
 
     Ok(())
@@ -558,7 +559,7 @@ fn handle_request_success(
     server_channel: u32,
     state: WaitingFor,
     stream: &mut SshStream,
-    encrypter: &mut Encrypter,
+    encrypter: &Arc<Mutex<Encrypter>>,
 ) -> Result<WaitingFor, Error> {
     if data.len() < 4 {
         return Err(Error::Other(
@@ -579,7 +580,8 @@ fn handle_request_success(
             SshStream::append_string(&mut request, b"shell");
             request.push(1); // want_reply = true
 
-            stream.send(&request, Some(encrypter))?;
+            let mut encrypter = encrypter.lock().unwrap();
+            stream.send(&request, Some(&mut encrypter))?;
 
             return Ok(WaitingFor::Shell);
         }
