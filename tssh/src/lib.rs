@@ -14,6 +14,7 @@ use std::io::{self, BufRead, BufReader, Write};
 use std::net::TcpStream;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use writer::spawn;
 
 // Packet Types
@@ -154,13 +155,37 @@ pub fn run(args: Args) -> Result<(), Error> {
     // Shared state with reading and writing thread
     let mut server_packet_max: u32 = 0;
     let remote_window: Arc<Mutex<u64>> = Arc::new(Mutex::new(0));
-    let encrypter = Arc::new(Mutex::new(encrypter));
+    let mut encrypter = Arc::new(Mutex::new(encrypter));
     let stop_flag = Arc::new(AtomicBool::new(false));
 
     loop {
         let (packet_type, data) = stream.read(Some(&mut decrypter))?;
         match packet_type {
             SSH_MSG_DISCONNECT => return Err(Error::Other("Host sent ssh disconnect message")),
+            SSH_MSG_KEXINIT => {
+                stop_flag.store(true, Ordering::Relaxed);
+                std::thread::sleep(Duration::from_millis(300));
+                if let Ok(mutex) = Arc::try_unwrap(encrypter) {
+                    let enc = mutex.into_inner().unwrap();
+                    let (enc, dec) =
+                        key_rexchange(data, &mut stream, hash_prefix.clone(), enc, decrypter)?;
+                    encrypter = Arc::new(Mutex::new(enc));
+                    decrypter = dec;
+                    stop_flag.store(false, Ordering::Relaxed);
+                    spawn(
+                        stream.try_clone()?,
+                        encrypter.clone(),
+                        remote_window.clone(),
+                        server_packet_max,
+                        server_channel,
+                        stop_flag.clone(),
+                    )?;
+                } else {
+                    return Err(Error::Other(
+                        "Failed to stop writing thread for key rexchange",
+                    ));
+                }
+            }
             SSH_MSG_GLOBAL_REQUEST => process_global_request(data)?,
             SSH_MSG_CHANNEL_OPEN => deny_channel_open(data, &mut stream, &encrypter)?,
             SSH_MSG_CHANNEL_OPEN_CONFIRMATION => {
@@ -429,6 +454,90 @@ fn authenticate(
             _ => (),
         }
     }
+}
+
+fn key_rexchange(
+    mut data: Vec<u8>,
+    stream: &mut SshStream,
+    mut hash_prefix: Vec<u8>,
+    mut old_enc: Encrypter,
+    old_dec: Decrypter,
+) -> Result<(Encrypter, Decrypter), Error> {
+    // Generate kexinit payload and add it to exchange hash prefix
+    let payload = gen_kexinit_payload();
+    SshStream::append_string(&mut hash_prefix, &payload);
+
+    // Send key negotiation information
+    stream.send(&payload, Some(&mut old_enc))?;
+
+    // Ensure packet can be a key exchange packet
+    if data.len() < 61 {
+        return Err(Error::Other(
+            "Key exchange packet is not large enough to contain all key exchange info",
+        ));
+    }
+
+    // Add packet to exchange hash prefix
+    data.insert(0, SSH_MSG_KEXINIT);
+    SshStream::append_string(&mut hash_prefix, &data);
+    data.remove(0);
+
+    // Extract packet information
+
+    // Don't need cookie but here incase needed later
+    // let cookie = &data[..16];
+
+    let (key_exchange_algs, data) = SshStream::extract_name_list(&data[16..])?;
+
+    let (host_key_algs, data) = SshStream::extract_name_list(data)?;
+
+    let (encrypt_algs_cts, data) = SshStream::extract_name_list(data)?;
+    let (encrypt_algs_stc, data) = SshStream::extract_name_list(data)?;
+
+    let (mac_algs_cts, data) = SshStream::extract_name_list(data)?;
+    let (mac_algs_stc, data) = SshStream::extract_name_list(data)?;
+
+    let (compress_algs_cts, data) = SshStream::extract_name_list(data)?;
+    let (compress_algs_stc, data) = SshStream::extract_name_list(data)?;
+
+    // Disregard language information
+    let (_, data) = SshStream::extract_name_list(data)?;
+    let (_, _) = SshStream::extract_name_list(data)?;
+
+    // Only valid guess requires client send first so for now this is irrelevant
+    // let server_guess: bool = packet[0] != 0;
+
+    // Begin negotiating shared algorithm
+    let key_exchange_alg = negotiate_alg(&KEX_ALGS, &key_exchange_algs)?;
+
+    let host_key_alg = negotiate_alg(&HOST_KEY_ALGS, &host_key_algs)?;
+
+    let encrypt_alg = negotiate_alg(&ENCRYPT_ALGS, &encrypt_algs_cts)?;
+    let decrypt_alg = negotiate_alg(&ENCRYPT_ALGS, &encrypt_algs_stc)?;
+
+    let mac_alg_send = negotiate_alg(&MAC_ALGS, &mac_algs_cts)?;
+    let verify_alg = negotiate_alg(&MAC_ALGS, &mac_algs_stc)?;
+
+    let compress_alg = negotiate_alg(&COMPRESS_ALGS, &compress_algs_cts)?;
+    let decompress_alg = negotiate_alg(&COMPRESS_ALGS, &compress_algs_stc)?;
+
+    // Normally you check for incorrect kex guesses here but the only implemented algorithm requires client to move first
+
+    generate(
+        stream,
+        key_exchange_alg,
+        host_key_alg,
+        encrypt_alg,
+        decrypt_alg,
+        mac_alg_send,
+        verify_alg,
+        compress_alg,
+        decompress_alg,
+        hash_prefix,
+        0,
+        Some(old_enc),
+        Some(old_dec),
+    )
 }
 
 /// Processes an ssh global request
