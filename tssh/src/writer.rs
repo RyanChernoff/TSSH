@@ -1,4 +1,7 @@
-use crate::{Error, SSH_MSG_CHANNEL_DATA, encrypter::Encrypter, ssh_stream::SshStream};
+use crate::{
+    Error, SSH_MSG_CHANNEL_DATA, SSH_MSG_CHANNEL_REQUEST, encrypter::Encrypter,
+    ssh_stream::SshStream,
+};
 use crossterm::{
     event::{Event, KeyCode, KeyEventKind, KeyModifiers, poll, read},
     terminal::{disable_raw_mode, enable_raw_mode},
@@ -98,7 +101,18 @@ pub fn spawn(
                             break;
                         }
                     }
-                    Event::Resize(_, _) => (),
+                    Event::Resize(width, height) => {
+                        let mut request = vec![SSH_MSG_CHANNEL_REQUEST];
+                        request.extend(channel.to_be_bytes());
+                        SshStream::append_string(&mut request, b"window-change");
+                        request.push(0);
+                        request.extend((width as u32).to_be_bytes());
+                        request.extend((height as u32).to_be_bytes());
+                        request.extend([0, 0, 0, 0, 0, 0, 0, 0]);
+
+                        let mut enc = encrypter.lock().unwrap();
+                        stream.send(&request, Some(&mut enc)).unwrap();
+                    }
                     _ => (),
                 }
             }
