@@ -6,9 +6,8 @@ use crossterm::{
     event::{Event, KeyCode, KeyEventKind, KeyModifiers, poll, read},
     terminal::{disable_raw_mode, enable_raw_mode},
 };
-use std::panic;
-use std::process;
 use std::{
+    panic, process,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -94,11 +93,6 @@ pub fn spawn(
                             // Send packet
                             let mut enc = encrypter.lock().unwrap();
                             stream.send(&packet, Some(&mut enc)).unwrap();
-                        }
-
-                        // temperary escape sequence to allow for quitting
-                        if event.code == KeyCode::Esc {
-                            break;
                         }
                     }
                     Event::Resize(width, height) => {

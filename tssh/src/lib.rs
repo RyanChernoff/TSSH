@@ -12,7 +12,7 @@ use std::array::TryFromSliceError;
 use std::fmt;
 use std::io::{self, BufRead, BufReader, Write};
 use std::net::TcpStream;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use writer::spawn;
 
@@ -21,8 +21,6 @@ use writer::spawn;
 const SSH_MSG_DISCONNECT: u8 = 1;
 /// Indicates that a pecket contains key exchange negotiation info
 const SSH_MSG_KEXINIT: u8 = 20;
-/// Indicates that a packet is a request for a specific service
-const SSH_MSG_SERVICE_REQUEST: u8 = 5;
 /// Indicates that a packet is accepting a request for a service
 const SSH_MSG_SERVICE_ACCEPT: u8 = 6;
 /// Indicates that a packet is requesting user authentication
@@ -37,10 +35,6 @@ const SSH_MSG_USERAUTH_BANNER: u8 = 53;
 const SSH_MSG_USERAUTH_PASSWD_CHANGEREQ: u8 = 60;
 /// Indicates that a general ssh request has been made
 const SSH_MSG_GLOBAL_REQUEST: u8 = 80;
-/// Indicates that a global request has been processed successfully
-const SSH_MSG_REQUEST_SUCCESS: u8 = 81;
-/// Indicates a failure to process a global request
-const SSH_MSG_REQUEST_FAILURE: u8 = 82;
 /// Indicates an attempt to open a channel
 const SSH_MSG_CHANNEL_OPEN: u8 = 90;
 /// Confirms the success of an open channel request
@@ -54,13 +48,18 @@ const SSH_MSG_CHANNEL_DATA: u8 = 94;
 /// Indicates data meant to be processed by a channel that is seperate
 /// from the normal stram (usually stderr)
 const SSH_MSG_CHANNEL_EXTENDED_DATA: u8 = 95;
+/// Indicates that the sender is no longer sending data over the channel
+const SSH_MSG_CHANNEL_EOF: u8 = 96;
+/// Indicates that a channel is being closed
+const SSH_MSG_CHANNEL_CLOSE: u8 = 97;
 /// Indicates a request to run a program via an open channel
 const SSH_MSG_CHANNEL_REQUEST: u8 = 98;
 /// Indicates that a channel request has been processed successfully
 const SSH_MSG_CHANNEL_SUCCESS: u8 = 99;
 /// Indicates that a channel request failed to be processed
 const SSH_MSG_CHANNEL_FAILURE: u8 = 100;
-
+/// Indicates the reason for disconnecting is that the application is done
+const SSH_DISCONNECT_BY_APPLICATION: [u8; 4] = [0, 0, 0, 11];
 /// Indicates the reason for a failure to open a channel was because it was unauthorized
 const SSH_OPEN_ADMINISTRATIVELY_PROHIBITED: [u8; 4] = [0, 0, 0, 1];
 
@@ -196,6 +195,13 @@ pub fn run(args: Args) -> Result<(), Error> {
                     server_channel,
                     local_window,
                 )?
+            }
+            SSH_MSG_CHANNEL_EOF => {
+                send_channel_close(&mut stream, &encrypter, server_channel, &stop_flag)?
+            }
+            SSH_MSG_CHANNEL_CLOSE => {
+                disconnect(&mut stream, &encrypter, server_channel, &stop_flag)?;
+                return Ok(());
             }
             SSH_MSG_CHANNEL_REQUEST => {
                 process_channel_request(data, server_channel, &mut stream, &encrypter)?
@@ -570,6 +576,7 @@ fn adjust_window(data: Vec<u8>) -> Result<u64, Error> {
     Ok(amount as u64)
 }
 
+/// Prints channel data to stdout and updates the client window apropriatly
 fn process_channel_data(
     data: Vec<u8>,
     stream: &mut SshStream,
@@ -613,6 +620,8 @@ fn process_channel_data(
     Ok(window_size - len)
 }
 
+/// Prints extended channel data to the appropiate channel (stderr for error data
+/// and stdout for all other data) and updates the client window accordingly
 fn process_extended_channel_data(
     data: Vec<u8>,
     stream: &mut SshStream,
@@ -662,6 +671,49 @@ fn process_extended_channel_data(
     }
 
     Ok(window_size - len)
+}
+
+/// Sends the EOF and channel close packets and closes the writing thread
+fn send_channel_close(
+    stream: &mut SshStream,
+    encrypter: &Arc<Mutex<Encrypter>>,
+    server_channel: u32,
+    stop_flag: &Arc<AtomicBool>,
+) -> Result<(), Error> {
+    // Terminate the writing thread
+    stop_flag.store(true, Ordering::Relaxed);
+
+    let mut message = vec![SSH_MSG_CHANNEL_EOF];
+    message.extend(server_channel.to_be_bytes());
+
+    // Send eof message
+    let mut encrypter = encrypter.lock().unwrap();
+    stream.send(&message, Some(&mut encrypter))?;
+
+    // Sends channel close message
+    message[0] = SSH_MSG_CHANNEL_CLOSE;
+    stream.send(&message, Some(&mut encrypter))
+}
+
+fn disconnect(
+    stream: &mut SshStream,
+    encrypter: &Arc<Mutex<Encrypter>>,
+    server_channel: u32,
+    stop_flag: &Arc<AtomicBool>,
+) -> Result<(), Error> {
+    // Terminate writing thread if eof not recieved
+    if !stop_flag.load(Ordering::Relaxed) {
+        send_channel_close(stream, encrypter, server_channel, stop_flag)?;
+    }
+
+    // Assemble disconnect message
+    let mut message = vec![SSH_MSG_DISCONNECT];
+    message.extend(SSH_DISCONNECT_BY_APPLICATION);
+    SshStream::append_string(&mut message, b"Done with session");
+    SshStream::append_string(&mut message, b"");
+
+    let mut encrypter = encrypter.lock().unwrap();
+    stream.send(&message, Some(&mut encrypter))
 }
 
 /// Handles channel specific requests
