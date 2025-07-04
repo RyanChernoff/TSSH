@@ -3,8 +3,9 @@ use crossterm::{
     event::{Event, KeyCode, KeyEventKind, KeyModifiers, poll, read},
     terminal::{disable_raw_mode, enable_raw_mode},
 };
+use std::panic;
+use std::process;
 use std::{
-    io::{self, Write},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -25,6 +26,13 @@ pub fn spawn(
     if packet_max < 16 {
         return Err(Error::Other("Server maximum packet size is too small"));
     }
+
+    // Exit the process if this thread panics
+    panic::set_hook(Box::new(|info| {
+        let _ = disable_raw_mode();
+        eprintln!("Writing thread panicked: {}", info);
+        process::exit(1);
+    }));
 
     thread::spawn(move || {
         enable_raw_mode().unwrap();
