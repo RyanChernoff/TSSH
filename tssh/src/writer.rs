@@ -1,4 +1,4 @@
-use crate::{encrypter::Encrypter, ssh_stream::SshStream};
+use crate::{Error, SSH_MSG_CHANNEL_DATA, encrypter::Encrypter, ssh_stream::SshStream};
 use crossterm::{
     event::{Event, KeyCode, KeyEventKind, KeyModifiers, poll, read},
     terminal::{disable_raw_mode, enable_raw_mode},
@@ -14,17 +14,24 @@ use std::{
 };
 
 pub fn spawn(
-    stream: SshStream,
+    mut stream: SshStream,
     encrypter: Arc<Mutex<Encrypter>>,
     window: Arc<Mutex<u64>>,
     packet_max: u32,
+    channel: u32,
     stop_flag: Arc<AtomicBool>,
-) {
+) -> Result<(), Error> {
+    // Check that packet max is acceptible
+    if packet_max < 16 {
+        return Err(Error::Other("Server maximum packet size is too small"));
+    }
+
     thread::spawn(move || {
         enable_raw_mode().unwrap();
 
         while !stop_flag.load(Ordering::Relaxed) {
             if poll(Duration::from_millis(100)).unwrap() {
+                // Capture key pressed
                 match read().unwrap() {
                     Event::Key(event) => {
                         // Ignore key release events
@@ -32,40 +39,51 @@ pub fn spawn(
                             continue;
                         }
 
-                        let mut output: String = String::from('\u{FFFD}');
+                        let mut data: Vec<u8> = Vec::new();
                         match event.code {
                             KeyCode::Char(c) => {
                                 if event.modifiers.contains(KeyModifiers::CONTROL) {
                                     let upper = c.to_ascii_uppercase();
                                     if upper >= 'A' && upper <= '_' {
-                                        output = String::from_utf8_lossy(&[(upper as u8) & 0x1F])
-                                            .to_string();
+                                        data.push((upper as u8) & 0x1F);
                                     } else {
-                                        output = String::from(c);
+                                        data.extend(c.encode_utf8(&mut [0; 4]).as_bytes());
                                     }
                                 } else {
-                                    output = String::from(c);
+                                    data.extend(c.encode_utf8(&mut [0; 4]).as_bytes());
                                 }
                             }
-                            KeyCode::Enter => output = String::from('\n'),
-                            KeyCode::Tab => output = String::from('\t'),
-                            KeyCode::Backspace => output = "\x08 \x08".to_string(),
-                            KeyCode::Esc => output = "\x1B".to_string(),
-                            KeyCode::Left => output = "\x1B[D".to_string(),
-                            KeyCode::Right => output = "\x1B[C".to_string(),
-                            KeyCode::Up => output = "\x1B[A".to_string(),
-                            KeyCode::Down => output = "\x1B[B".to_string(),
-                            KeyCode::Insert => output = "\x1B[2~".to_string(),
-                            KeyCode::Delete => output = "\x1B[3~".to_string(),
-                            KeyCode::Home => output = "\x1B[H".to_string(),
-                            KeyCode::End => output = "\x1B[F".to_string(),
-                            KeyCode::PageUp => output = "\x1B[5~".to_string(),
-                            KeyCode::PageDown => output = "\x1B[6~".to_string(),
+                            KeyCode::Enter => data.push(b'\n'),
+                            KeyCode::Tab => data.push(b'\t'),
+                            KeyCode::Backspace => data.push(b'\x7F'),
+                            KeyCode::Esc => data.push(b'\x1B'),
+                            KeyCode::Left => data.extend(b"\x1B[D"),
+                            KeyCode::Right => data.extend(b"\x1B[C"),
+                            KeyCode::Up => data.extend(b"\x1B[A"),
+                            KeyCode::Down => data.extend(b"\x1B[B"),
+                            KeyCode::Insert => data.extend(b"\x1B[2~"),
+                            KeyCode::Delete => data.push(b'\x7F'),
+                            KeyCode::Home => data.extend(b"\x1B[H"),
+                            KeyCode::End => data.extend(b"\x1B[F"),
+                            KeyCode::PageUp => data.extend(b"\x1B[5~"),
+                            KeyCode::PageDown => data.extend(b"\x1B[6~"),
                             _ => (),
                         }
 
-                        write!(io::stdout(), "{}", output).unwrap();
-                        io::stdout().flush().unwrap();
+                        for byte in data {
+                            // Wait until we can send data
+                            wait_for_window(&window);
+
+                            // Assemble data packet
+                            let mut packet = vec![SSH_MSG_CHANNEL_DATA];
+                            packet.extend(channel.to_be_bytes());
+                            packet.extend(b"\x00\x00\x00\x01");
+                            packet.push(byte);
+
+                            // Send packet
+                            let mut enc = encrypter.lock().unwrap();
+                            stream.send(&packet, Some(&mut enc)).unwrap();
+                        }
 
                         // temperary escape sequence to allow for quitting
                         if event.code == KeyCode::Esc {
@@ -80,4 +98,17 @@ pub fn spawn(
 
         disable_raw_mode().unwrap();
     });
+
+    Ok(())
+}
+
+/// Thjs function blocks the thread until the window is non-zero and decriments it by one
+fn wait_for_window(window: &Arc<Mutex<u64>>) {
+    loop {
+        let mut window = window.lock().unwrap();
+        if *window != 0 {
+            *window -= 1;
+            return;
+        }
+    }
 }

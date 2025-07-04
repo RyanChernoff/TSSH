@@ -93,6 +93,7 @@ pub struct Args<'a> {
 }
 
 /// The types of errors that can be returned by running tssh
+#[derive(Debug)]
 pub enum Error {
     Io(io::Error),
     TryFromSliceError(TryFromSliceError),
@@ -734,8 +735,9 @@ fn handle_request_success(
                 encrypter.clone(),
                 remote_window.clone(),
                 server_packet_max,
+                server_channel,
                 stop_flag.clone(),
-            );
+            )?;
             return Ok(WaitingFor::None);
         }
         WaitingFor::None => {
