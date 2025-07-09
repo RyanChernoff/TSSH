@@ -1,8 +1,8 @@
 # TSSH
 TSSH is a minimal version of a secure shell protocol version 2.0 client based off of the RFC specifications.
 It currently only allows for opening a remote shell on port 22 (the default ssh port) via password authenication.
-The transport layer only implements ecdh-sha2-nistp256 for both encryption, rsa-sha2-512 for host key signiture verification,
-and aes256-ctr for mac-ing. TSSH does not implement compression for packet sending.
+The transport layer only implements ecdh-sha2-nistp256 for key exchange, rsa-sha2-512 for host key signiture verification,
+aes256-ctr for both encryption and decryption, and hmac-sha2-256 for mac-ing. TSSH does not implement compression for packet sending.
 
 # Usage
 To use TSSH, compile it with cargo and run the exicutable with either the servers address or username@adress as the first and 
